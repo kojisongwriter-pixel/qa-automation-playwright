@@ -1,0 +1,7 @@
+node_modules/
+test-results/
+playwright-report/
+.env
+*.env.local
+*.tgz
+.qa-platform/

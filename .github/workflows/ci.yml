@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      assurelayer_run_id:
+        description: "AssureLayer test_run id this execution is bound to (not a secret — just a correlation id)."
+        required: false
+        type: string
+      # Derived by AssureLayer from the run's own environment / test-suite records
+      # and sent as controlled values. `type: choice` makes GitHub itself refuse
+      # anything outside these lists; scripts/assurelayer/resolve-scope.js
+      # validates them again before any test runs.
+      environment:
+        description: "Target environment for this AssureLayer run (sets ENV)."
+        required: false
+        type: choice
+        options:
+          - staging
+          - production
+      suite:
+        description: "Test suite for this AssureLayer run (selects the test directory)."
+        required: false
+        type: choice
+        options:
+          - smoke
+          - regression
+          - api
+          - full
+
+jobs:
+  test:
+    name: Playwright Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # id-token: write is required to request a GitHub Actions OIDC token
+    # (used by the AssureLayer results callback below to prove this specific
+    # job's identity without any pre-shared secret). contents: read is the
+    # least-privilege default for checkout. packages: read is the ONLY extra
+    # permission, needed because `npm ci` installs
+    # @kojisongwriter-pixel/qa-platform-core from GitHub Packages using this
+    # repository's GITHUB_TOKEN (an explicit `permissions:` block otherwise grants
+    # it nothing). No other permission is granted.
+    #
+    # NOTE (future distribution concern, NOT solved here): this only works for the
+    # internal client-template path, where the package grants this repository
+    # access. An external customer repository cannot read another account's
+    # package with its own GITHUB_TOKEN; how the core package is distributed to
+    # such repositories is a separate, later decision.
+    permissions:
+      id-token: write
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@kojisongwriter-pixel'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      # AssureLayer-dispatched runs only: validate the environment/suite inputs
+      # against the closed allow-lists and export ENV + ASSURELAYER_SUITE to the
+      # next steps. Inputs reach the script ONLY via env (never interpolated into
+      # a shell command). Push / pull_request runs skip this step entirely.
+      - name: Resolve AssureLayer execution scope
+        if: ${{ inputs.assurelayer_run_id != '' }}
+        run: node scripts/assurelayer/resolve-scope.js
+        env:
+          ASSURELAYER_ENVIRONMENT: ${{ inputs.environment }}
+          ASSURELAYER_SUITE_INPUT: ${{ inputs.suite }}
+
+      # ASSURELAYER_RUN_ID is empty on push / pull_request, which leaves the
+      # Playwright reporters (and every other behavior of this step) exactly as
+      # they were. This step is NOT continue-on-error: a Playwright failure
+      # fails the job regardless of what the callback step does afterwards.
+      - name: Run tests
+        id: tests
+        run: npx playwright test
+        env:
+          ASSURELAYER_RUN_ID: ${{ inputs.assurelayer_run_id }}
+
+      # AssureLayer callback: ONLY for workflow_dispatch executions started by
+      # AssureLayer. `always()` makes it run even when Playwright failed (the
+      # failure is what gets reported); it never changes that failure into a
+      # success. Never runs on push or pull_request.
+      - name: Report results to AssureLayer
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.assurelayer_run_id != '' }}
+        run: node scripts/assurelayer-callback.js
+        env:
+          ASSURELAYER_RUN_ID: ${{ inputs.assurelayer_run_id }}
+          ASSURELAYER_API_URL: ${{ vars.ASSURELAYER_API_URL }}
+          ASSURELAYER_OIDC_AUDIENCE: ${{ vars.ASSURELAYER_OIDC_AUDIENCE }}
+          PLAYWRIGHT_OUTCOME: ${{ steps.tests.outcome }}
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: playwright-report/
+          retention-days: 30
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ github.run_id }}
+          path: test-results/
+          retention-days: 30
