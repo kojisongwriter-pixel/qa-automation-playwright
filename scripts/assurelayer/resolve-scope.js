@@ -2,14 +2,17 @@
 // Resolves the AssureLayer-dispatched execution scope and exports it to the
 // remaining workflow steps through $GITHUB_ENV:
 //
-//   ENV                 -> config/environments.js selects the target URL, and
-//                          qa-platform-core's FailureReporter stamps it into
-//                          every Failure Contract as `environment`
-//   ASSURELAYER_SUITE   -> playwright.config.js selects the test directory
+//   ENV                  -> config/environments.js selects the target URL, and
+//                           qa-platform-core's FailureReporter stamps it into
+//                           every Failure Contract as `environment`
+//   ASSURELAYER_SUITE    -> playwright.config.js selects the test directory
+//   ASSURELAYER_BROWSERS -> playwright.config.js creates exactly these browser
+//                           projects, and install-browsers.js installs exactly
+//                           these browsers (empty input = all four)
 //
 // The inputs arrive ONLY as environment variables (never spliced into a shell
 // command) and are validated against closed allow-lists first. An invalid or
-// missing value fails the step BEFORE any test runs.
+// missing value fails the step BEFORE any browser is installed or test runs.
 
 const fs = require('fs');
 const { resolveScope } = require('./scope');
@@ -17,10 +20,11 @@ const { resolveScope } = require('./scope');
 function main(env = process.env) {
   const environment = env.ASSURELAYER_ENVIRONMENT;
   const suite = env.ASSURELAYER_SUITE_INPUT;
+  const browsers = env.ASSURELAYER_BROWSERS_INPUT;
 
   let scope;
   try {
-    scope = resolveScope(environment, suite);
+    scope = resolveScope(environment, suite, browsers);
   } catch (error) {
     console.error(`assurelayer resolve-scope: ${error.message}`);
     return 1;
@@ -30,8 +34,8 @@ function main(env = process.env) {
     console.error('assurelayer resolve-scope: GITHUB_ENV is not set');
     return 2;
   }
-  fs.appendFileSync(env.GITHUB_ENV, `ENV=${scope.environment}\nASSURELAYER_SUITE=${scope.suite}\n`);
-  console.log(`assurelayer resolve-scope: environment=${scope.environment} suite=${scope.suite} testDir=${scope.testDir}`);
+  fs.appendFileSync(env.GITHUB_ENV, `ENV=${scope.environment}\nASSURELAYER_SUITE=${scope.suite}\nASSURELAYER_BROWSERS=${scope.browsers.join(',')}\n`);
+  console.log(`assurelayer resolve-scope: environment=${scope.environment} suite=${scope.suite} testDir=${scope.testDir} browsers=${scope.browsers.join(',')}`);
   return 0;
 }
 

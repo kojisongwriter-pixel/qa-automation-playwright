@@ -25,14 +25,44 @@ const SUITE_DIRS = {
 
 const SUITES = Object.keys(SUITE_DIRS);
 
-function resolveScope(environment, suite) {
+// Browser projects (closed list, canonical order) — the same four ids the
+// AssureLayer dashboard stores and dispatches. Each is a Playwright project:
+//   chrome  branded Google Chrome (channel "chrome")
+//   msedge  branded Microsoft Edge (channel "msedge")
+//   firefox Playwright's Firefox
+//   webkit  Playwright's WebKit (Safari's engine — not Safari on an Apple device)
+const BROWSERS = ['chrome', 'msedge', 'firefox', 'webkit'];
+
+// UI tests run once per selected browser; API tests (tests/api/**) run once,
+// browser-independent, in the `api` project. Matched against the absolute path.
+const API_TESTS = /[\\/]tests[\\/]api[\\/]/;
+
+/**
+ * The browser selection for a dispatched run. Empty/absent = all four (the
+ * AssureLayer default). Otherwise a comma-separated list: every id must be in
+ * BROWSERS, no duplicates, nothing empty. Returned in canonical order. Anything
+ * else THROWS — a run never silently falls back to a different browser set.
+ */
+function parseBrowserSelection(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return [...BROWSERS];
+  const ids = String(raw).split(',').map((s) => s.trim());
+  for (const id of ids) {
+    if (!BROWSERS.includes(id)) {
+      throw new Error(`Unsupported browser "${id.slice(0, 40)}". Allowed: ${BROWSERS.join(', ')}`);
+    }
+  }
+  if (new Set(ids).size !== ids.length) throw new Error('Duplicate browser in the selection.');
+  return BROWSERS.filter((b) => ids.includes(b));
+}
+
+function resolveScope(environment, suite, browsers) {
   if (!ENVIRONMENTS.includes(environment)) {
     throw new Error(`Unsupported environment "${String(environment).slice(0, 40)}". Allowed: ${ENVIRONMENTS.join(', ')}`);
   }
   if (!Object.prototype.hasOwnProperty.call(SUITE_DIRS, suite)) {
     throw new Error(`Unsupported suite "${String(suite).slice(0, 40)}". Allowed: ${SUITES.join(', ')}`);
   }
-  return { environment, suite, testDir: SUITE_DIRS[suite] };
+  return { environment, suite, testDir: SUITE_DIRS[suite], browsers: parseBrowserSelection(browsers) };
 }
 
 function suiteTestDir(suite) {
@@ -42,4 +72,4 @@ function suiteTestDir(suite) {
   return SUITE_DIRS[suite];
 }
 
-module.exports = { ENVIRONMENTS, SUITES, SUITE_DIRS, resolveScope, suiteTestDir };
+module.exports = { ENVIRONMENTS, SUITES, SUITE_DIRS, BROWSERS, API_TESTS, parseBrowserSelection, resolveScope, suiteTestDir };

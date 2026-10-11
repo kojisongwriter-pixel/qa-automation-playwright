@@ -20,7 +20,7 @@ const { validateFailureContract } = require('@kojisongwriter-pixel/qa-platform-c
 const ROOT = path.resolve(__dirname, '..', '..');
 const FIXTURE_CONFIG = path.join(__dirname, 'fixture-project', 'playwright.config.js');
 const CALLBACK_SCRIPT = path.join(ROOT, 'scripts', 'assurelayer-callback.js');
-const WORKFLOW = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+const WORKFLOW = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8').replace(/\r\n/g, '\n');
 // Structural assertions must look at YAML, not at prose inside # comments.
 const WORKFLOW_CODE = WORKFLOW.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
 
@@ -83,7 +83,9 @@ test('buildPayload produces the versioned callback contract with engine-validate
   assert.deepEqual(statuses, ['failed', 'passed', 'passed', 'skipped']);
 
   const failed = payload.results.find((r) => r.status === 'failed');
-  assert.deepEqual(Object.keys(failed).sort(), ['failure', 'retry_count', 'status', 'test_id', 'test_title']);
+  assert.deepEqual(Object.keys(failed).sort(), ['browser_project', 'failure', 'retry_count', 'status', 'test_id', 'test_key', 'test_title']);
+  assert.equal(failed.browser_project, null, 'the browserless fixture project has no browser project');
+  assert.match(failed.test_key, /^[0-9a-f]{40}$/, 'a stable logical test key');
   assert.equal(validateFailureContract(failed.failure).valid, true, 'the failure is the engine Failure Contract, unmodified');
   assert.equal(failed.failure.testId, failed.test_id);
   assert.equal(failed.failure.retryCount, 1, 'the FINAL failed attempt represents the test');
@@ -262,15 +264,15 @@ test('permissions are exactly id-token: write, contents: read, packages: read â€
   assert.equal((WORKFLOW_CODE.match(/:\s*write\b/g) || []).length, 1, 'only id-token is write');
 });
 
-test('package installation: `npm ci` gets NODE_AUTH_TOKEN from GITHUB_TOKEN (no personal token in the workflow)', () => {
+test('package installation: `npm ci` gets NODE_AUTH_TOKEN from the client package credential, else GITHUB_TOKEN (no personal token in the workflow)', () => {
   const step = stepBlock('Install dependencies');
   assert.match(step, /run: npm ci/);
-  assert.match(step, /NODE_AUTH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
+  assert.match(step, /NODE_AUTH_TOKEN: \$\{\{ secrets\.ASSURELAYER_PACKAGES_TOKEN \|\| secrets\.GITHUB_TOKEN \}\}/);
   assert.match(WORKFLOW_CODE, /registry-url: 'https:\/\/npm\.pkg\.github\.com'/);
   assert.match(WORKFLOW_CODE, /scope: '@kojisongwriter-pixel'/);
-  // no personal/other credential anywhere: the only secrets reference is GITHUB_TOKEN
+  // no other credential anywhere: the only secret references are the read-only package credential and GITHUB_TOKEN
   const secretRefs = [...WORKFLOW_CODE.matchAll(/secrets\.([A-Za-z0-9_]+)/g)].map((m) => m[1]);
-  assert.deepEqual([...new Set(secretRefs)], ['GITHUB_TOKEN']);
+  assert.deepEqual([...new Set(secretRefs)].sort(), ['ASSURELAYER_PACKAGES_TOKEN', 'GITHUB_TOKEN']);
   assert.ok(!/\b(PAT|ghp_|github_pat_)\b/.test(WORKFLOW_CODE));
 });
 
@@ -290,9 +292,13 @@ test('the Playwright step is NOT masked: no continue-on-error, so its failure st
   assert.ok(!/\|\|\s*true/.test(WORKFLOW_CODE), 'no `|| true` swallowing failures');
 });
 
-test('the callback step is the only step gated on workflow_dispatch; push/PR never reach it', () => {
-  const matches = WORKFLOW.match(/github\.event_name == 'workflow_dispatch'/g) || [];
-  assert.equal(matches.length, 1);
+test('only dispatched runs reach scope resolution, selected-browser install and the callback; push/PR take the original Chromium install', () => {
+  const DISPATCHED = "github.event_name == 'workflow_dispatch' && (inputs.assurelayer_run_id != '' || inputs.browsers != '')";
+  assert.ok(stepBlock('Resolve AssureLayer execution scope').includes(`if: \${{ ${DISPATCHED} }}`));
+  assert.ok(stepBlock('Install selected browsers').includes(`if: \${{ ${DISPATCHED} }}`));
+  assert.ok(stepBlock('Install Playwright browsers').includes(`if: \${{ !(${DISPATCHED}) }}`), 'push/PR keep the chromium install');
+  assert.match(stepBlock('Report results to AssureLayer'), /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' && inputs\.assurelayer_run_id != '' \}\}/);
+  assert.equal((WORKFLOW_CODE.match(/github\.event_name == 'workflow_dispatch'/g) || []).length, 4, 'no other step is gated on dispatch');
   assert.ok(!/github\.event_name == 'push'/.test(WORKFLOW));
 });
 

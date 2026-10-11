@@ -31,6 +31,14 @@ on:
           - regression
           - api
           - full
+      # Browser projects for this run, as sent by AssureLayer from the project's
+      # saved selection: a comma-separated subset of chrome, msedge, firefox,
+      # webkit. Empty = all four (the default). Validated against that closed
+      # list by scripts/assurelayer/resolve-scope.js before anything is installed.
+      browsers:
+        description: "Browser projects for this run (comma-separated: chrome, msedge, firefox, webkit). Empty = all four."
+        required: false
+        type: string
 
 jobs:
   test:
@@ -73,19 +81,31 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.ASSURELAYER_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
 
+      # Push / pull_request (and a plain manual dispatch): the original single
+      # bundled-Chromium installation, unchanged.
       - name: Install Playwright browsers
+        if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.assurelayer_run_id != '' || inputs.browsers != '')) }}
         run: npx playwright install --with-deps chromium
 
-      # AssureLayer-dispatched runs only: validate the environment/suite inputs
-      # against the closed allow-lists and export ENV + ASSURELAYER_SUITE to the
+      # Dispatched runs (AssureLayer, or an operator's cross-browser dispatch):
+      # validate the environment/suite/browser inputs against the closed
+      # allow-lists and export ENV + ASSURELAYER_SUITE + ASSURELAYER_BROWSERS to the
       # next steps. Inputs reach the script ONLY via env (never interpolated into
       # a shell command). Push / pull_request runs skip this step entirely.
       - name: Resolve AssureLayer execution scope
-        if: ${{ inputs.assurelayer_run_id != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.assurelayer_run_id != '' || inputs.browsers != '') }}
         run: node scripts/assurelayer/resolve-scope.js
         env:
           ASSURELAYER_ENVIRONMENT: ${{ inputs.environment }}
           ASSURELAYER_SUITE_INPUT: ${{ inputs.suite }}
+          ASSURELAYER_BROWSERS_INPUT: ${{ inputs.browsers }}
+
+      # Dispatched runs: install exactly the selected browsers (validated again;
+      # no shell; branded Chrome / Edge installed explicitly). A failed install
+      # fails the job before any test runs.
+      - name: Install selected browsers
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.assurelayer_run_id != '' || inputs.browsers != '') }}
+        run: node scripts/assurelayer/install-browsers.js
 
       # ASSURELAYER_RUN_ID is empty on push / pull_request, which leaves the
       # Playwright reporters (and every other behavior of this step) exactly as

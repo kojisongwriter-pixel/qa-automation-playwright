@@ -8,13 +8,37 @@ const config = require('./config/environments');
 // their reporters and behavior are exactly as before.
 const assurelayerRun = !!process.env.ASSURELAYER_RUN_ID;
 
-// For an AssureLayer-dispatched run the SUITE selects which tests execute
-// (ASSURELAYER_SUITE is validated and exported by scripts/assurelayer/resolve-scope.js).
-// An invalid or missing suite throws here, so a run can never silently fall back
-// to a different scope than the one that was requested. Push / pull_request runs
-// keep the original './tests'.
-const { suiteTestDir } = require('./scripts/assurelayer/scope');
-const testDir = assurelayerRun ? suiteTestDir(process.env.ASSURELAYER_SUITE) : './tests';
+// A dispatched scope (resolve-scope.js exported ASSURELAYER_SUITE / ASSURELAYER_BROWSERS):
+// an AssureLayer run, or an operator's manual cross-browser dispatch.
+const dispatched = assurelayerRun || !!process.env.ASSURELAYER_SUITE;
+
+// For a dispatched run the SUITE selects which tests execute (ASSURELAYER_SUITE is
+// validated and exported by scripts/assurelayer/resolve-scope.js). An invalid or
+// missing suite throws here, so a run can never silently fall back to a different
+// scope than the one that was requested. Push / pull_request runs keep './tests'.
+const { suiteTestDir, parseBrowserSelection, API_TESTS } = require('./scripts/assurelayer/scope');
+const testDir = dispatched ? suiteTestDir(process.env.ASSURELAYER_SUITE) : './tests';
+
+// The four supported browser projects. Branded Chrome and Edge are selected by
+// their Playwright CHANNEL (a device descriptor alone would be bundled Chromium).
+const BROWSER_USE = {
+  chrome: { ...devices['Desktop Chrome'], channel: 'chrome' },
+  msedge: { ...devices['Desktop Edge'], channel: 'msedge' },
+  firefox: { ...devices['Desktop Firefox'] },
+  // Playwright's WebKit: Safari's engine — not Safari on an Apple device.
+  webkit: { ...devices['Desktop Safari'] },
+};
+
+// Dispatched runs: exactly the selected browsers (ASSURELAYER_BROWSERS, validated —
+// an invalid value throws; absent = all four) for UI tests, plus ONE browser-
+// independent `api` project for tests/api/** (API tests never repeat per browser).
+// Push / pull_request runs keep the original single bundled-Chromium project.
+const projects = dispatched
+  ? [
+      ...parseBrowserSelection(process.env.ASSURELAYER_BROWSERS).map((name) => ({ name, testIgnore: API_TESTS, use: BROWSER_USE[name] })),
+      { name: 'api', testMatch: API_TESTS, use: {} },
+    ]
+  : [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }];
 
 module.exports = defineConfig({
   testDir,
@@ -25,6 +49,8 @@ module.exports = defineConfig({
 
   reporter: [
     ['html', { outputFolder: 'playwright-report', open: 'never' }],
+    // Dispatched runs also list every test with its browser project in the job log.
+    ...(dispatched ? [['list']] : []),
     ...(assurelayerRun
       ? [
           ['./reporters/assurelayer-results-reporter.js'],
@@ -42,10 +68,5 @@ module.exports = defineConfig({
 
   outputDir: 'test-results/',
 
-  projects: [
-    {
-      name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
-    },
-  ],
+  projects,
 });

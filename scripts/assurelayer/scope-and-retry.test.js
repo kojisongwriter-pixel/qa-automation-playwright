@@ -19,7 +19,7 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const FIXTURE_CONFIG = path.join(__dirname, 'fixture-project', 'playwright.config.js');
 const CALLBACK_SCRIPT = path.join(ROOT, 'scripts', 'assurelayer-callback.js');
 const RESOLVE_SCOPE = path.join(__dirname, 'resolve-scope.js');
-const WORKFLOW = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+const WORKFLOW = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8').replace(/\r\n/g, '\n');
 // Structural assertions must look at YAML, not at prose inside # comments.
 const WORKFLOW_CODE = WORKFLOW.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
 
@@ -90,9 +90,12 @@ test('inputs are NEVER interpolated into a shell command: they reach steps only 
   }
 });
 
-test('the scope-resolution step runs only for AssureLayer runs and precedes the tests', () => {
+test('the scope-resolution step runs only for dispatched runs and precedes the browser install and the tests', () => {
   const step = stepBlock('Resolve AssureLayer execution scope');
-  assert.match(step, /if: \$\{\{ inputs\.assurelayer_run_id != '' \}\}/);
+  assert.match(step, /if: \$\{\{ github\.event_name == 'workflow_dispatch' && \(inputs\.assurelayer_run_id != '' \|\| inputs\.browsers != ''\) \}\}/);
+  assert.match(step, /ASSURELAYER_BROWSERS_INPUT: \$\{\{ inputs\.browsers \}\}/);
+  assert.ok(WORKFLOW.indexOf('Resolve AssureLayer execution scope') < WORKFLOW.indexOf('- name: Install selected browsers'));
+  assert.ok(WORKFLOW.indexOf('- name: Install selected browsers') < WORKFLOW.indexOf('- name: Run tests'));
   assert.match(step, /run: node scripts\/assurelayer\/resolve-scope\.js/);
   assert.match(step, /ASSURELAYER_ENVIRONMENT: \$\{\{ inputs\.environment \}\}/);
   assert.match(step, /ASSURELAYER_SUITE_INPUT: \$\{\{ inputs\.suite \}\}/);
@@ -105,8 +108,8 @@ test('resolve-scope exports ENV and ASSURELAYER_SUITE for valid inputs', () => {
   for (const [environment, suite] of [['staging', 'smoke'], ['production', 'full'], ['staging', 'regression'], ['production', 'api']]) {
     const r = runResolveScope({ ASSURELAYER_ENVIRONMENT: environment, ASSURELAYER_SUITE_INPUT: suite });
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(r.exported, `ENV=${environment}\nASSURELAYER_SUITE=${suite}\n`);
-    assert.deepEqual(resolveScope(environment, suite), { environment, suite, testDir: SUITE_DIRS[suite] });
+    assert.equal(r.exported, `ENV=${environment}\nASSURELAYER_SUITE=${suite}\nASSURELAYER_BROWSERS=chrome,msedge,firefox,webkit\n`, 'no browser input = all four');
+    assert.deepEqual(resolveScope(environment, suite), { environment, suite, testDir: SUITE_DIRS[suite], browsers: ['chrome', 'msedge', 'firefox', 'webkit'] });
   }
 });
 
@@ -132,7 +135,7 @@ test('SCOPE INVARIANT: dispatch input -> ENV -> Failure Contract environment -> 
     assert.equal(resolved.status, 0);
     const exported = Object.fromEntries(resolved.exported.trim().split('\n').map((l) => l.split('=')));
     const run = runFixtureProject(exported);
-    assert.deepEqual(collectedTitles(run.cwd), SMOKE_TITLES, 'only the requested suite ran');
+    assert.deepEqual([...new Set(collectedTitles(run.cwd))], SMOKE_TITLES, 'only the requested suite ran (once per selected browser)');
     const contracts = failureContracts(run.cwd);
     assert.ok(contracts.length > 0, 'the fixture has a failing test');
     for (const contract of contracts) {
@@ -153,16 +156,16 @@ test('suite selection controls which tests actually execute (real Playwright run
 
 test('the real playwright.config.js: AssureLayer runs use the suite directory; push/PR keep ./tests; a bad suite throws', () => {
   const load = (env) =>
-    spawnSync(process.execPath, ['-e', "const c=require('./playwright.config.js');console.log(JSON.stringify({testDir:c.testDir,reporters:c.reporter.length}))"], {
+    spawnSync(process.execPath, ['-e', "const c=require('./playwright.config.js');console.log(JSON.stringify({testDir:c.testDir,reporters:c.reporter.length,projects:c.projects.map((p)=>p.name)}))"], {
       cwd: ROOT, env: { PATH: process.env.PATH, ENV: 'staging', ...env }, encoding: 'utf8',
     });
 
   const smoke = load({ ASSURELAYER_RUN_ID: 'r', ASSURELAYER_SUITE: 'smoke' });
   assert.equal(smoke.status, 0, smoke.stderr);
-  assert.deepEqual(JSON.parse(smoke.stdout), { testDir: './tests/smoke', reporters: 3 });
+  assert.deepEqual(JSON.parse(smoke.stdout), { testDir: './tests/smoke', reporters: 4, projects: ['chrome', 'msedge', 'firefox', 'webkit', 'api'] }, 'html + list + the two AssureLayer reporters; all four browsers by default');
 
   assert.equal(JSON.parse(load({ ASSURELAYER_RUN_ID: 'r', ASSURELAYER_SUITE: 'full' }).stdout).testDir, './tests');
-  assert.deepEqual(JSON.parse(load({}).stdout), { testDir: './tests', reporters: 1 }, 'push/PR behavior is unchanged');
+  assert.deepEqual(JSON.parse(load({}).stdout), { testDir: './tests', reporters: 1, projects: ['chromium'] }, 'push/PR behavior is unchanged');
 
   assert.notEqual(load({ ASSURELAYER_RUN_ID: 'r', ASSURELAYER_SUITE: 'nope' }).status, 0, 'an invalid suite must not silently fall back');
   assert.notEqual(load({ ASSURELAYER_RUN_ID: 'r' }).status, 0, 'a missing suite must not silently fall back');

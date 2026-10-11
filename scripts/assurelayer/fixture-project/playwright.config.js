@@ -4,7 +4,7 @@
 // enables the AssureLayer reporters, but its tests need no browser and no network.
 const path = require('path');
 const { defineConfig } = require('@playwright/test');
-const { suiteTestDir } = require('../scope');
+const { suiteTestDir, parseBrowserSelection } = require('../scope');
 
 module.exports = defineConfig({
   testDir: path.resolve(__dirname, suiteTestDir(process.env.ASSURELAYER_SUITE || 'full')),
@@ -12,6 +12,9 @@ module.exports = defineConfig({
   retries: 1,
   workers: 1,
   outputDir: 'test-results/',
+  // Browserless projects NAMED like the browser selection (when one is given),
+  // so the reporters' per-browser output can be verified without launching a browser.
+  ...(process.env.ASSURELAYER_BROWSERS ? { projects: parseBrowserSelection(process.env.ASSURELAYER_BROWSERS).map((name) => ({ name })) } : {}),
   reporter: [
     ['list'],
     [path.resolve(__dirname, '../../../reporters/assurelayer-results-reporter.js')],

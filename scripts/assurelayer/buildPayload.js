@@ -1,7 +1,10 @@
 // Builds the AssureLayer results-callback payload (contract version 1.0.0):
 //
 //   { version, execution_status, results: [{ test_id, test_title, status,
-//     retry_count, failure }], execution_error }
+//     retry_count, failure, browser_project, test_key }], execution_error }
+//
+// browser_project / test_key come from the results collector (the Playwright
+// project that produced the result, and the logical test across browsers).
 //
 // It only ASSEMBLES what the run already produced:
 //   - per-test outcomes from the results collector reporter, and
@@ -77,6 +80,8 @@ function buildPayload({ resultsFile, failuresDir, playwrightOutcome }) {
         status: 'failed',
         retry_count: entry.retryCount,
         failure,
+        browser_project: entry.browserProject ?? null,
+        test_key: entry.testKey ?? null,
       });
     } else {
       results.push({
@@ -85,6 +90,8 @@ function buildPayload({ resultsFile, failuresDir, playwrightOutcome }) {
         status: entry.status,
         retry_count: entry.retryCount,
         failure: null,
+        browser_project: entry.browserProject ?? null,
+        test_key: entry.testKey ?? null,
       });
     }
   }
