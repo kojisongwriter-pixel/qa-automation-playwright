@@ -68,10 +68,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Node 26 (Active LTS): better-sqlite3 (a dependency of qa-platform-core)
+      # ships a prebuilt Node 26 binary (ABI v147), so `npm ci` downloads it
+      # instead of compiling SQLite from source as it did on Node 20, which has
+      # no prebuilt binary (~60–90 s of the setup time on every run).
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 26
           registry-url: 'https://npm.pkg.github.com'
           scope: '@kojisongwriter-pixel'
           cache: 'npm'
