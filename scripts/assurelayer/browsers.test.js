@@ -11,7 +11,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { BROWSERS, parseBrowserSelection } = require('./scope');
-const { installArgs } = require('./install-browsers');
+const { installPlan, runPlaywright, main: installBrowsers } = require('./install-browsers');
 const { buildPayload } = require('./buildPayload');
 
 const ROOT = path.resolve(__dirname, '..', '..');
@@ -71,16 +71,152 @@ test('resolve-scope exports the validated selection, defaults to all four, and r
 
 // ---- Installation -----------------------------------------------------------------
 
-test('installation arguments: exactly the selected browsers, branded Chrome/Edge installed explicitly, no shell', () => {
-  assert.deepEqual(installArgs(''), ['install', '--with-deps', '--force', 'chrome', 'msedge', 'firefox', 'webkit']);
-  assert.deepEqual(installArgs('firefox,webkit'), ['install', '--with-deps', 'firefox', 'webkit'], 'no unnecessary downloads for a subset');
-  assert.deepEqual(installArgs('msedge'), ['install', '--with-deps', '--force', 'msedge']);
-  assert.throws(() => installArgs('chromium'));
+const CI = { CI: 'true' };
+
+test('installation plan: exactly the selected browsers, branded Chrome/Edge installed explicitly, no shell', () => {
+  assert.deepEqual(installPlan('', CI), {
+    osDeps: ['install-deps', 'chrome', 'msedge', 'firefox', 'webkit'],
+    downloads: ['install', 'ffmpeg', 'firefox', 'webkit'],
+    browsers: ['install', 'chrome', 'msedge', 'firefox', 'webkit'],
+  });
+  assert.deepEqual(installPlan('firefox,webkit', CI), {
+    osDeps: ['install-deps', 'firefox', 'webkit'],
+    downloads: ['install', 'ffmpeg', 'firefox', 'webkit'],
+    browsers: ['install', 'firefox', 'webkit'],
+  });
+  assert.deepEqual(installPlan('msedge', CI), {
+    osDeps: ['install-deps', 'msedge'],
+    downloads: ['install', 'ffmpeg'],
+    browsers: ['install', 'msedge'],
+  });
+  assert.throws(() => installPlan('chromium', CI));
   const src = fs.readFileSync(path.join(__dirname, 'install-browsers.js'), 'utf8');
-  assert.match(src, /spawnSync\(process\.execPath, \[cli, \.\.\.args\]/, 'argument array, never a shell string');
+  assert.match(src, /spawn\(process\.execPath, \[cli, \.\.\.args\]/, 'argument array, never a shell string');
   assert.doesNotMatch(src, /shell:\s*true|execSync\(|exec\(/);
   const r = spawnSync(process.execPath, [path.join(__dirname, 'install-browsers.js')], { env: { PATH: process.env.PATH, ASSURELAYER_BROWSERS: 'opera' }, encoding: 'utf8' });
   assert.equal(r.status, 1, 'an invalid selection fails before installing anything');
+});
+
+test('installation plan: --force never re-downloads under CI, and still replaces branded browsers outside it', () => {
+  for (const env of [{ CI: 'true' }, { CI: '1' }]) {
+    assert.ok(!installPlan('', env).browsers.includes('--force'), `CI=${env.CI}`);
+  }
+  for (const env of [{}, { CI: 'false' }, { CI: '0' }]) {
+    assert.deepEqual(installPlan('', env).browsers, ['install', '--force', 'chrome', 'msedge', 'firefox', 'webkit'], `CI=${env.CI}`);
+  }
+  assert.deepEqual(installPlan('firefox', {}).browsers, ['install', 'firefox'], 'no --force without a branded browser');
+  for (const selection of ['', 'chrome', 'firefox,webkit']) {
+    const plan = installPlan(selection, CI);
+    assert.equal(plan.downloads.filter((a) => a === 'ffmpeg').length, 1, 'FFmpeg is requested once');
+    assert.ok(!plan.browsers.includes('ffmpeg'), 'phase 2 does not ask for FFmpeg');
+    assert.ok(!plan.osDeps.includes('--force') && !plan.downloads.includes('--force'));
+  }
+});
+
+// A controllable stand-in for the Playwright CLI: each started operation stays
+// pending until the test settles it, so ordering needs no timers.
+function fakePlaywright() {
+  const started = [];
+  const run = (args, env) => new Promise((resolve) => started.push({ args, env, finish: resolve }));
+  const osDeps = () => started.find((s) => s.args[0] === 'install-deps');
+  const downloads = () => started.find((s) => s.args.includes('ffmpeg'));
+  return { started, run, osDeps, downloads };
+}
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+const silenced = async (fn) => {
+  const { log, error } = console;
+  console.log = () => {};
+  console.error = () => {};
+  try {
+    return await fn();
+  } finally {
+    console.log = log;
+    console.error = error;
+  }
+};
+const ENV = { ...CI, ASSURELAYER_BROWSERS: '' };
+
+test('installer: OS packages and downloads overlap, and Chrome/Edge start only after both succeed', () => silenced(async () => {
+  const pw = fakePlaywright();
+  const done = installBrowsers(ENV, pw.run);
+  await flush();
+  assert.equal(pw.started.length, 2, 'both operations are running before either has finished');
+  assert.ok(pw.osDeps() && pw.downloads());
+  pw.osDeps().finish(0);
+  await flush();
+  assert.equal(pw.started.length, 2, 'phase 2 waits for the downloads too');
+  pw.downloads().finish(0);
+  await flush();
+  assert.equal(pw.started.length, 3);
+  assert.deepEqual(pw.started[2].args, ['install', 'chrome', 'msedge', 'firefox', 'webkit']);
+  pw.started[2].finish(0);
+  assert.equal(await done, 0);
+}));
+
+test('installer: only the early download skips the host check; the post-apt command keeps it', () => silenced(async () => {
+  const pw = fakePlaywright();
+  const done = installBrowsers(ENV, pw.run);
+  await flush();
+  assert.equal(pw.downloads().env.PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS, '1');
+  assert.equal(pw.osDeps().env.PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS, undefined);
+  pw.osDeps().finish(0);
+  pw.downloads().finish(0);
+  await flush();
+  assert.equal(pw.started[2].env.PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS, undefined);
+  pw.started[2].finish(0);
+  await done;
+}));
+
+for (const [failing, other] of [['osDeps', 'downloads'], ['downloads', 'osDeps']]) {
+  test(`installer: a failed ${failing} fails the step, after waiting for ${other}, and Chrome/Edge never start`, () => silenced(async () => {
+    const pw = fakePlaywright();
+    let settled = false;
+    const done = installBrowsers(ENV, pw.run).then((code) => {
+      settled = true;
+      return code;
+    });
+    await flush();
+    pw[failing]().finish(1);
+    await flush();
+    assert.equal(settled, false, 'the other operation is still awaited');
+    pw[other]().finish(0);
+    assert.equal(await done, 3);
+    assert.equal(pw.started.length, 2, 'phase 2 did not start');
+  }));
+}
+
+test('installer: a failed Chrome/Edge install fails the step', () => silenced(async () => {
+  const pw = fakePlaywright();
+  const done = installBrowsers(ENV, pw.run);
+  await flush();
+  pw.osDeps().finish(0);
+  pw.downloads().finish(0);
+  await flush();
+  pw.started[2].finish(1);
+  assert.equal(await done, 3);
+}));
+
+test('installer: an invalid selection starts nothing', () => silenced(async () => {
+  const pw = fakePlaywright();
+  assert.equal(await installBrowsers({ ...CI, ASSURELAYER_BROWSERS: 'opera' }, pw.run), 1);
+  assert.equal(pw.started.length, 0);
+}));
+
+test('runPlaywright: reports the real exit code, a kill, and a missing script as failures', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'install-browsers-'));
+  try {
+    const script = (name, body) => {
+      const file = path.join(dir, name);
+      fs.writeFileSync(file, body);
+      return file;
+    };
+    assert.equal(await runPlaywright([], process.env, script('ok.js', 'process.exit(0)')), 0);
+    assert.equal(await runPlaywright([], process.env, script('bad.js', 'process.exit(7)')), 7);
+    assert.notEqual(await runPlaywright([], process.env, script('killed.js', "process.kill(process.pid, 'SIGKILL'); setInterval(() => {}, 1000)")), 0);
+    assert.notEqual(await runPlaywright([], process.env, path.join(dir, 'missing.js')), 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---- Playwright projects ------------------------------------------------------------
