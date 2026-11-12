@@ -298,8 +298,40 @@ test('only dispatched runs reach scope resolution, selected-browser install and 
   assert.ok(stepBlock('Install selected browsers').includes(`if: \${{ ${DISPATCHED} }}`));
   assert.ok(stepBlock('Install Playwright browsers').includes(`if: \${{ !(${DISPATCHED}) }}`), 'push/PR keep the chromium install');
   assert.match(stepBlock('Report results to AssureLayer'), /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' && inputs\.assurelayer_run_id != '' \}\}/);
-  assert.equal((WORKFLOW_CODE.match(/github\.event_name == 'workflow_dispatch'/g) || []).length, 4, 'no other step is gated on dispatch');
+  assert.ok(stepBlock('OS package cache key').includes(`if: \${{ ${DISPATCHED} }}`), 'the OS package cache exists only on the dispatched path');
+  assert.equal((WORKFLOW_CODE.match(/github\.event_name == 'workflow_dispatch'/g) || []).length, 5, 'no other step is gated on dispatch');
   assert.ok(!/github\.event_name == 'push'/.test(WORKFLOW));
+});
+
+test('OS package cache: keyed by runner image, used before the install, saved only after results are reported, never caching branded browsers', () => {
+  const key = stepBlock('OS package cache key');
+  assert.match(key, /id: apt-key/);
+  assert.match(key, /key=apt-debs-\$\{ImageOS\}-\$\{ImageVersion\}-\$\(sha256sum package-lock\.json \| cut -c1-16\)/, 'image + lockfile, from the runner environment');
+  assert.doesNotMatch(key.match(/run: .*/)[0], /inputs\./, 'no workflow input reaches the shell');
+
+  const restore = stepBlock('Restore OS package cache');
+  assert.match(restore, /uses: actions\/cache\/restore@v4/);
+  assert.match(restore, /if: \$\{\{ steps\.apt-key\.outputs\.key != '' \}\}/);
+  assert.match(restore, /restore-keys: apt-debs-/);
+
+  const use = stepBlock('Use cached OS packages');
+  assert.match(use, /if: \$\{\{ steps\.apt-cache\.outputs\.cache-matched-key != '' \}\}/);
+  assert.match(use, /sudo cp -t \/var\/cache\/apt\/archives\//, 'apt reads them from its own archive (and still verifies them)');
+
+  const order = ['OS package cache key', 'Restore OS package cache', 'Use cached OS packages', 'Install selected browsers', 'Run tests', 'Report results to AssureLayer', 'Upload test results', 'Collect OS packages for the cache', 'Save OS package cache'];
+  const positions = order.map((name) => WORKFLOW.indexOf(`- name: ${name}`));
+  assert.deepEqual([...positions].sort((a, b) => a - b), positions, `steps in order: ${order.join(' -> ')}`);
+
+  const gate = "if: ${{ always() && steps.install-browsers.outcome == 'success' && steps.apt-cache.outputs.cache-hit != 'true' }}";
+  const collect = stepBlock('Collect OS packages for the cache');
+  assert.ok(collect.includes(gate), 'only after a successful install, only when the exact entry is missing');
+  assert.match(collect, /sudo apt-get autoclean -qq/, 'versions the index no longer offers are not carried forward');
+  assert.match(collect, /! -name 'google-chrome\*' ! -name 'microsoft-edge\*'/, 'branded browsers are always installed fresh, never from the cache');
+  const save = stepBlock('Save OS package cache');
+  assert.ok(save.includes(gate));
+  assert.match(save, /uses: actions\/cache\/save@v4/);
+  assert.match(save, /key: \$\{\{ steps\.apt-key\.outputs\.key \}\}/);
+  assert.match(stepBlock('Install selected browsers'), /id: install-browsers/);
 });
 
 test('the playwright config enables the AssureLayer reporters only when ASSURELAYER_RUN_ID is set', () => {
