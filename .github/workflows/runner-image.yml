@@ -1,0 +1,111 @@
+name: Runner image
+
+# Builds, validates and publishes the AssureLayer four-browser runner image
+# (runner-image/Dockerfile): daily, so it carries the latest stable Chrome and
+# Edge, and on demand. A candidate is published only after its versions are
+# recorded and all four browsers pass the smoke suite INSIDE it.
+#
+# Publishing never changes what client runs use: ci.yml pins an image by
+# immutable digest, and a new digest reaches it only through a reviewed change.
+# On main, this workflow proposes that change on its own branch
+# (runner-image/update-<tag>) and opens a pull request when the repository
+# allows GitHub Actions to; it never pushes to main.
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: runner-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build, validate and publish the runner image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # GITHUB_TOKEN only: contents (push the proposal branch, never main),
+    # packages (publish to ghcr.io), pull-requests (open the proposal).
+    permissions:
+      contents: write
+      packages: write
+      pull-requests: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/assurelayer-runner
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build candidate image
+        id: build
+        run: |
+          tag="$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          docker build --pull \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --build-arg SOURCE_COMMIT="$GITHUB_SHA" \
+            -t "$IMAGE:$tag" runner-image
+          docker image inspect --format 'size={{.Size}}' "$IMAGE:$tag"
+
+      - name: Record image contents
+        run: docker run --rm "$IMAGE:${{ steps.build.outputs.tag }}" cat /etc/assurelayer-runner-image.json | tee runner-image.json
+
+      # The candidate must run this repository's smoke suite in all four browsers,
+      # exactly as a dispatched run does, before it can be published.
+      - name: Four-browser smoke test in the candidate image
+        run: |
+          docker run --rm --ipc=host \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e CI=true -e NODE_AUTH_TOKEN -e ENV -e ASSURELAYER_SUITE -e ASSURELAYER_BROWSERS \
+            -e ASSURELAYER_RUNNER_IMAGE="$IMAGE:${{ steps.build.outputs.tag }}" \
+            "$IMAGE:${{ steps.build.outputs.tag }}" \
+            bash -c 'npm ci && node scripts/assurelayer/verify-runner-image.js && npx playwright test'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.ASSURELAYER_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+          ENV: staging
+          ASSURELAYER_SUITE: smoke
+          ASSURELAYER_BROWSERS: chrome,msedge,firefox,webkit
+
+      # Report-only: HIGH/CRITICAL findings with an available fix are listed in the
+      # job summary for review; they do not block the daily build.
+      - name: Vulnerability scan
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.58.1 \
+            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --no-progress --exit-code 0 \
+            "$IMAGE:${{ steps.build.outputs.tag }}" | tee trivy.txt
+          { echo '### Vulnerability scan (HIGH/CRITICAL, fixable)'; echo '```'; grep -E '^Total:|^[a-z0-9.-]+ \(' trivy.txt || echo 'no findings'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish
+        id: publish
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:${{ steps.build.outputs.tag }}"
+          ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE:${{ steps.build.outputs.tag }}")"
+          docker logout ghcr.io
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          { echo "### Published"; echo "tag: \`${{ steps.build.outputs.tag }}\`"; echo "image: \`$ref\`"; echo '```json'; cat runner-image.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Scheduled/main builds only: propose the new digest for review.
+      - name: Propose the new digest for review
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          branch="runner-image/update-${{ steps.build.outputs.tag }}"
+          sed -i -E "s#${IMAGE}@sha256:[0-9a-f]{64}#${REF}#g" .github/workflows/ci.yml
+          if git diff --quiet; then echo "ci.yml does not reference the runner image; nothing to propose"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -q -am "ci: runner image ${{ steps.build.outputs.tag }}"
+          git push origin "$branch"
+          { echo "Runner image \`${{ steps.build.outputs.tag }}\` passed the four-browser smoke test and is published as \`${REF}\`."; echo; echo '```json'; cat runner-image.json; echo '```'; echo; echo "Merging this changes the image dispatched AssureLayer runs use. The previous digest stays published for rollback."; } > pr-body.md
+          gh pr create --base main --head "$branch" --title "ci: runner image ${{ steps.build.outputs.tag }}" --body-file pr-body.md \
+            || echo "::warning::Could not open the pull request automatically (the repository does not allow GitHub Actions to create pull requests). Open one from branch $branch."
+        env:
+          REF: ${{ steps.publish.outputs.ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
