@@ -213,11 +213,15 @@ jobs:
       - name: Verify runner image
         run: node scripts/assurelayer/verify-runner-image.js
 
+      # HOME=/root: the job container runs as root, and Firefox refuses to start
+      # when $HOME (/github/home, owned by the runner user) belongs to another
+      # user — Playwright's documented setting for GitHub Actions containers.
       - name: Run tests
         id: tests
         run: npx playwright test
         env:
           ASSURELAYER_RUN_ID: ${{ inputs.assurelayer_run_id }}
+          HOME: /root
 
       - name: Report results to AssureLayer
         if: ${{ always() && inputs.assurelayer_run_id != '' }}

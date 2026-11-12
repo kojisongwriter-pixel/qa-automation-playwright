@@ -97,6 +97,7 @@ test('ci.yml runner-image job: scope, image check, tests, callback and artifacts
   assert.match(step('Resolve AssureLayer execution scope'), /ASSURELAYER_BROWSERS_INPUT: \$\{\{ inputs\.browsers \}\}/, 'inputs only via env');
   assert.match(step('Verify runner image'), /run: node scripts\/assurelayer\/verify-runner-image\.js/);
   assert.match(step('Run tests'), /id: tests[\s\S]*ASSURELAYER_RUN_ID: \$\{\{ inputs\.assurelayer_run_id \}\}/);
+  assert.match(step('Run tests'), /HOME: \/root/, 'Firefox runs as root in the job container only with a root-owned HOME');
   assert.match(step('Report results to AssureLayer'), /if: \$\{\{ always\(\) && inputs\.assurelayer_run_id != '' \}\}[\s\S]*PLAYWRIGHT_OUTCOME: \$\{\{ steps\.tests\.outcome \}\}/);
   assert.match(step('Upload test results'), /test-results\/\s*\n\s*runner-image-record\//, 'the image record travels with the evidence');
   assert.doesNotMatch(j, /continue-on-error/);
