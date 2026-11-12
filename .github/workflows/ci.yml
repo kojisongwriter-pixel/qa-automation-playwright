@@ -109,10 +109,36 @@ jobs:
           ASSURELAYER_SUITE_INPUT: ${{ inputs.suite }}
           ASSURELAYER_BROWSERS_INPUT: ${{ inputs.browsers }}
 
+      # OS package cache (dispatched runs). The browsers' OS packages come from the
+      # runner's regional Ubuntu mirror, which has stalled for minutes (18 min on
+      # 2026-11-10). The .deb files apt downloaded are kept in the Actions cache,
+      # keyed by runner image: on a hit apt installs from those files — it checks
+      # each against the signed package index and downloads anything that changed —
+      # and on a miss it uses the mirror exactly as before. The package list and
+      # every browser version are unchanged. Branded Chrome / Edge are not cached.
+      - name: OS package cache key
+        id: apt-key
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.assurelayer_run_id != '' || inputs.browsers != '') }}
+        run: echo "key=apt-debs-${ImageOS}-${ImageVersion}-$(sha256sum package-lock.json | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore OS package cache
+        id: apt-cache
+        if: ${{ steps.apt-key.outputs.key != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/assurelayer-apt
+          key: ${{ steps.apt-key.outputs.key }}
+          restore-keys: apt-debs-
+
+      - name: Use cached OS packages
+        if: ${{ steps.apt-cache.outputs.cache-matched-key != '' }}
+        run: find ~/.cache/assurelayer-apt -maxdepth 1 -name '*.deb' -exec sudo cp -t /var/cache/apt/archives/ {} +
+
       # Dispatched runs: install exactly the selected browsers (validated again;
       # no shell; branded Chrome / Edge installed explicitly). A failed install
       # fails the job before any test runs.
       - name: Install selected browsers
+        id: install-browsers
         if: ${{ github.event_name == 'workflow_dispatch' && (inputs.assurelayer_run_id != '' || inputs.browsers != '') }}
         run: node scripts/assurelayer/install-browsers.js
 
@@ -154,6 +180,24 @@ jobs:
           name: test-results-${{ github.run_id }}
           path: test-results/
           retention-days: 30
+
+      # After the results are reported and uploaded (so it never delays them):
+      # store this image's OS packages when the exact cache entry did not exist.
+      # `apt-get autoclean` first drops package files the current index no longer
+      # offers, so restored older versions are not carried forward.
+      - name: Collect OS packages for the cache
+        if: ${{ always() && steps.install-browsers.outcome == 'success' && steps.apt-cache.outputs.cache-hit != 'true' }}
+        run: |
+          sudo apt-get autoclean -qq
+          mkdir -p ~/.cache/assurelayer-apt
+          find /var/cache/apt/archives -maxdepth 1 -name '*.deb' ! -name 'google-chrome*' ! -name 'microsoft-edge*' -exec cp -t ~/.cache/assurelayer-apt {} +
+
+      - name: Save OS package cache
+        if: ${{ always() && steps.install-browsers.outcome == 'success' && steps.apt-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/assurelayer-apt
+          key: ${{ steps.apt-key.outputs.key }}
 
   # Dispatched runs (AssureLayer, or an operator's cross-browser dispatch) in the
   # prebuilt four-browser runner image (runner-image/Dockerfile): Node.js, the
