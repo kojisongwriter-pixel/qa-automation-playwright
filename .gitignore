@@ -5,3 +5,4 @@ playwright-report/
 *.env.local
 *.tgz
 .qa-platform/
+runner-image-record/

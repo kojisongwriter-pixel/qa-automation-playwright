@@ -41,8 +41,13 @@ on:
         type: string
 
 jobs:
+  # Push / pull_request runs (and a plain manual dispatch). Dispatched runs use the
+  # `assurelayer` job below (prebuilt runner image) — unless the repository variable
+  # ASSURELAYER_RUNNER_IMAGE_DISABLED is 'true', which sends them back through this
+  # job's per-run installation (rollback without a code change).
   test:
     name: Playwright Tests
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.assurelayer_run_id != '' || inputs.browsers != '') && vars.ASSURELAYER_RUNNER_IMAGE_DISABLED != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # id-token: write is required to request a GitHub Actions OIDC token
@@ -148,4 +153,95 @@ jobs:
         with:
           name: test-results-${{ github.run_id }}
           path: test-results/
+          retention-days: 30
+
+  # Dispatched runs (AssureLayer, or an operator's cross-browser dispatch) in the
+  # prebuilt four-browser runner image (runner-image/Dockerfile): Node.js, the
+  # browsers' OS packages, Chrome, Edge, Firefox, WebKit and FFmpeg are already in
+  # the image, so nothing is installed per run. The image is pinned by immutable
+  # digest — in `container.image` and, identically, in ASSURELAYER_RUNNER_IMAGE —
+  # and changes only through a reviewed change to this file
+  # (.github/workflows/runner-image.yml proposes it). Same inputs, scope
+  # resolution, tests, callback and artifacts as the `test` job.
+  assurelayer:
+    name: Playwright Tests (runner image)
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.assurelayer_run_id != '' || inputs.browsers != '') && vars.ASSURELAYER_RUNNER_IMAGE_DISABLED != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: ghcr.io/kojisongwriter-pixel/assurelayer-runner@sha256:2d443b86021e6590178c2f5de99f135fd133b896f4497782114524a1c7f03fdc
+      # Pull with this run's own GITHUB_TOKEN (packages: read below); no other credential.
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --ipc=host
+    # Same permissions as the `test` job, for the same reasons.
+    permissions:
+      id-token: write
+      contents: read
+      packages: read
+    env:
+      ASSURELAYER_RUNNER_IMAGE: ghcr.io/kojisongwriter-pixel/assurelayer-runner@sha256:2d443b86021e6590178c2f5de99f135fd133b896f4497782114524a1c7f03fdc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The image's Node.js is used as is (the image check below enforces the
+      # version); only the npm download cache is restored.
+      - name: Restore npm cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-runner-image-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.ASSURELAYER_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Resolve AssureLayer execution scope
+        run: node scripts/assurelayer/resolve-scope.js
+        env:
+          ASSURELAYER_ENVIRONMENT: ${{ inputs.environment }}
+          ASSURELAYER_SUITE_INPUT: ${{ inputs.suite }}
+          ASSURELAYER_BROWSERS_INPUT: ${{ inputs.browsers }}
+
+      # Fails the run before any test when the image does not match this
+      # repository (Node, Playwright, the selected browsers' revisions, FFmpeg),
+      # and records the image's exact versions for the run's evidence.
+      - name: Verify runner image
+        run: node scripts/assurelayer/verify-runner-image.js
+
+      - name: Run tests
+        id: tests
+        run: npx playwright test
+        env:
+          ASSURELAYER_RUN_ID: ${{ inputs.assurelayer_run_id }}
+
+      - name: Report results to AssureLayer
+        if: ${{ always() && inputs.assurelayer_run_id != '' }}
+        run: node scripts/assurelayer-callback.js
+        env:
+          ASSURELAYER_RUN_ID: ${{ inputs.assurelayer_run_id }}
+          ASSURELAYER_API_URL: ${{ vars.ASSURELAYER_API_URL }}
+          ASSURELAYER_OIDC_AUDIENCE: ${{ vars.ASSURELAYER_OIDC_AUDIENCE }}
+          PLAYWRIGHT_OUTCOME: ${{ steps.tests.outcome }}
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: playwright-report/
+          retention-days: 30
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ github.run_id }}
+          path: |
+            test-results/
+            runner-image-record/
           retention-days: 30

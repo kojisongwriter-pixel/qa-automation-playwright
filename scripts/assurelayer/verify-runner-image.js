@@ -8,8 +8,9 @@
 // never silently test with browsers its Playwright was not built for.
 //
 // It also records the image (configured reference + the build record baked into
-// the image) in test-results/, which is uploaded as the run's evidence, and in
-// the workflow log.
+// the image) in runner-image-record/ — uploaded with the test results as the
+// run's evidence (Playwright empties test-results/ when it starts) — and in the
+// workflow log.
 
 const fs = require('fs');
 const path = require('path');
@@ -68,8 +69,8 @@ function main(env = process.env) {
     console.log(`  built ${record.build_date} from ${record.source_commit} · ${record.os} · Node ${record.node} · Playwright ${record.playwright}`);
     console.log(`  Chrome ${record.chrome} · Edge ${record.msedge} · Firefox ${record.firefox && record.firefox.version} (r${record.firefox && record.firefox.playwright_revision}) · WebKit r${record.webkit && record.webkit.playwright_revision} · FFmpeg r${record.ffmpeg && record.ffmpeg.playwright_revision}`);
   }
-  fs.mkdirSync(path.join(root, 'test-results'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'test-results', 'assurelayer-runner-image.json'), `${JSON.stringify(summary, null, 2)}\n`);
+  fs.mkdirSync(path.join(root, 'runner-image-record'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'runner-image-record', 'assurelayer-runner-image.json'), `${JSON.stringify(summary, null, 2)}\n`);
 
   if (result.problems.length) {
     for (const p of result.problems) console.error(`assurelayer runner image: ${p}`);

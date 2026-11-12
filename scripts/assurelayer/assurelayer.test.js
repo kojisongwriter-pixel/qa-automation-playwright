@@ -256,12 +256,14 @@ test('workflow_dispatch accepts the assurelayer_run_id input', () => {
   assert.match(WORKFLOW, /assurelayer_run_id:[\s\S]*?type: string/);
 });
 
-test('permissions are exactly id-token: write, contents: read, packages: read — nothing else', () => {
-  const block = WORKFLOW.match(/permissions:\n((?:\s{6}\S.*\n)+)/);
-  assert.ok(block, 'a permissions block exists');
-  const lines = block[1].trim().split('\n').map((l) => l.trim()).sort();
-  assert.deepEqual(lines, ['contents: read', 'id-token: write', 'packages: read']);
-  assert.equal((WORKFLOW_CODE.match(/:\s*write\b/g) || []).length, 1, 'only id-token is write');
+test('permissions are exactly id-token: write, contents: read, packages: read — nothing else (in each job)', () => {
+  const blocks = [...WORKFLOW.matchAll(/permissions:\n((?:\s{6}\S.*\n)+)/g)];
+  assert.equal(blocks.length, 2, 'one permissions block per job (test, assurelayer)');
+  for (const block of blocks) {
+    const lines = block[1].trim().split('\n').map((l) => l.trim()).sort();
+    assert.deepEqual(lines, ['contents: read', 'id-token: write', 'packages: read']);
+  }
+  assert.equal((WORKFLOW_CODE.match(/:\s*write\b/g) || []).length, 2, 'only id-token is write, once per job');
 });
 
 test('package installation: `npm ci` gets NODE_AUTH_TOKEN from the client package credential, else GITHUB_TOKEN (no personal token in the workflow)', () => {
@@ -298,7 +300,8 @@ test('only dispatched runs reach scope resolution, selected-browser install and 
   assert.ok(stepBlock('Install selected browsers').includes(`if: \${{ ${DISPATCHED} }}`));
   assert.ok(stepBlock('Install Playwright browsers').includes(`if: \${{ !(${DISPATCHED}) }}`), 'push/PR keep the chromium install');
   assert.match(stepBlock('Report results to AssureLayer'), /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' && inputs\.assurelayer_run_id != '' \}\}/);
-  assert.equal((WORKFLOW_CODE.match(/github\.event_name == 'workflow_dispatch'/g) || []).length, 4, 'no other step is gated on dispatch');
+  // 4 in the `test` job's steps + its job condition + the runner-image job's condition (runner-image.test.js).
+  assert.equal((WORKFLOW_CODE.match(/github\.event_name == 'workflow_dispatch'/g) || []).length, 6, 'no other step is gated on dispatch');
   assert.ok(!/github\.event_name == 'push'/.test(WORKFLOW));
 });
 
