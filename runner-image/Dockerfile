@@ -16,7 +16,12 @@
 FROM ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5
 
 # Must match the client workflow (Node 26) and package-lock.json (@playwright/test).
-ARG NODE_VERSION=26.13.0
+# 26.13.1 is the Node 26 security release of 2026-11-10.
+ARG NODE_VERSION=26.13.1
+# npm bundled with Node 26.13.x is 11.20.0, which ships undici 6.28.0 and brace-expansion 5.0.9
+# (CVE-2026-19534, -87018, -109383, -109869; CVE-2026-102276, -102278). 11.21.2 — same major —
+# bundles undici 6.29.1 and brace-expansion 5.0.12, the fixed versions.
+ARG NPM_VERSION=11.21.2
 ARG PLAYWRIGHT_VERSION=1.61.0
 ARG BUILD_DATE=unknown
 ARG SOURCE_COMMIT=unknown
@@ -38,12 +43,19 @@ RUN set -eu; \
     grep " ${file}\$" SHASUMS256.txt | sha256sum -c -; \
     tar -xJf "${file}" -C /usr/local --strip-components=1 --no-same-owner; \
     rm -f "${file}" SHASUMS256.txt; \
+    npm install -g "npm@${NPM_VERSION}"; \
+    rm -rf /root/.npm; \
     node --version; npm --version
 
 # The four browsers and their OS packages, with the project's pinned Playwright —
 # the same installer (and the same package list) dispatched runs used per run.
-RUN npx --yes "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chrome msedge firefox webkit \
- && rm -rf /var/lib/apt/lists/* /root/.npm /tmp/*
+# One layer per part, so a pull downloads them in parallel instead of one 2.6 GB
+# layer as a single stream; each layer leaves no apt lists or caches behind.
+RUN npm install -g "playwright@${PLAYWRIGHT_VERSION}" && rm -rf /root/.npm /tmp/*
+RUN playwright install-deps chrome msedge firefox webkit && rm -rf /var/lib/apt/lists/* /tmp/*
+RUN playwright install chrome && rm -rf /var/lib/apt/lists/* /tmp/*
+RUN playwright install msedge && rm -rf /var/lib/apt/lists/* /tmp/*
+RUN playwright install firefox webkit && rm -rf /tmp/*
 
 # Build record: exact versions, read by the workflow's image check and uploaded with test results.
 COPY record-versions.js /usr/local/lib/assurelayer/record-versions.js

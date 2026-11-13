@@ -22,6 +22,7 @@ const record = {
   source_commit: process.env.SOURCE_COMMIT || 'unknown',
   os: version('bash', ['-c', '. /etc/os-release && echo "$PRETTY_NAME"']),
   node: process.version.replace(/^v/, ''),
+  npm: version('npm', ['--version']),
   playwright: process.env.PLAYWRIGHT_VERSION,
   browsers_path: browsersPath,
   chrome: version('google-chrome', ['--version']).replace(/^Google Chrome /, ''),

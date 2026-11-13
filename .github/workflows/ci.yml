@@ -71,14 +71,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Node 26 (Active LTS): better-sqlite3 (a dependency of qa-platform-core)
       # ships a prebuilt Node 26 binary (ABI v147), so `npm ci` downloads it
       # instead of compiling SQLite from source as it did on Node 20, which has
       # no prebuilt binary (~60–90 s of the setup time on every run).
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 26
           registry-url: 'https://npm.pkg.github.com'
@@ -124,7 +124,7 @@ jobs:
       - name: Restore OS package cache
         id: apt-cache
         if: ${{ steps.apt-key.outputs.key != '' }}
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ~/.cache/assurelayer-apt
           key: ${{ steps.apt-key.outputs.key }}
@@ -166,7 +166,7 @@ jobs:
           PLAYWRIGHT_OUTCOME: ${{ steps.tests.outcome }}
 
       - name: Upload HTML report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: playwright-report-${{ github.run_id }}
@@ -174,7 +174,7 @@ jobs:
           retention-days: 30
 
       - name: Upload test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: test-results-${{ github.run_id }}
@@ -194,7 +194,7 @@ jobs:
 
       - name: Save OS package cache
         if: ${{ always() && steps.install-browsers.outcome == 'success' && steps.apt-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: ~/.cache/assurelayer-apt
           key: ${{ steps.apt-key.outputs.key }}
@@ -226,15 +226,23 @@ jobs:
       packages: read
     env:
       ASSURELAYER_RUNNER_IMAGE: ghcr.io/kojisongwriter-pixel/assurelayer-runner@sha256:2d443b86021e6590178c2f5de99f135fd133b896f4497782114524a1c7f03fdc
+    # 'true' once the container is running: from then on this job's own callback
+    # step reports the outcome, so the reporter job below stays out.
+    outputs:
+      started: ${{ steps.started.outputs.started }}
 
     steps:
+      - name: Execution started
+        id: started
+        run: echo "started=true" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # The image's Node.js is used as is (the image check below enforces the
       # version); only the npm download cache is restored.
       - name: Restore npm cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.npm
           key: npm-runner-image-${{ hashFiles('package-lock.json') }}
@@ -277,7 +285,7 @@ jobs:
           PLAYWRIGHT_OUTCOME: ${{ steps.tests.outcome }}
 
       - name: Upload HTML report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: playwright-report-${{ github.run_id }}
@@ -285,7 +293,7 @@ jobs:
           retention-days: 30
 
       - name: Upload test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: test-results-${{ github.run_id }}
@@ -293,3 +301,31 @@ jobs:
             test-results/
             runner-image-record/
           retention-days: 30
+
+  # The image job could not start at all (e.g. the image could not be pulled or the
+  # container did not start), so it never reached its own callback step. Report
+  # that execution failure to AssureLayer at once — with no results — instead of
+  # leaving the run 'running' until the stale-run policy closes it. It never runs
+  # tests (no duplicate execution or results); a cancelled run is not reported.
+  # Rollback to the per-run installation stays an explicit choice
+  # (ASSURELAYER_RUNNER_IMAGE_DISABLED), never automatic.
+  report-runner-image-failure:
+    name: Report runner-image failure to AssureLayer
+    needs: assurelayer
+    if: ${{ always() && needs.assurelayer.result == 'failure' && needs.assurelayer.outputs.started != 'true' && inputs.assurelayer_run_id != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Report results to AssureLayer
+        run: node scripts/assurelayer-callback.js
+        env:
+          ASSURELAYER_RUN_ID: ${{ inputs.assurelayer_run_id }}
+          ASSURELAYER_API_URL: ${{ vars.ASSURELAYER_API_URL }}
+          ASSURELAYER_OIDC_AUDIENCE: ${{ vars.ASSURELAYER_OIDC_AUDIENCE }}
+          PLAYWRIGHT_OUTCOME: runner_image_unavailable

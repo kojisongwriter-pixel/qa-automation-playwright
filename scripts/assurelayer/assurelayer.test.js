@@ -257,13 +257,12 @@ test('workflow_dispatch accepts the assurelayer_run_id input', () => {
 });
 
 test('permissions are exactly id-token: write, contents: read, packages: read — nothing else (in each job)', () => {
-  const blocks = [...WORKFLOW.matchAll(/permissions:\n((?:\s{6}\S.*\n)+)/g)];
-  assert.equal(blocks.length, 2, 'one permissions block per job (test, assurelayer)');
-  for (const block of blocks) {
-    const lines = block[1].trim().split('\n').map((l) => l.trim()).sort();
-    assert.deepEqual(lines, ['contents: read', 'id-token: write', 'packages: read']);
-  }
-  assert.equal((WORKFLOW_CODE.match(/:\s*write\b/g) || []).length, 2, 'only id-token is write, once per job');
+  const blocks = [...WORKFLOW.matchAll(/permissions:\n((?:\s{6}\S.*\n)+)/g)].map((b) => b[1].trim().split('\n').map((l) => l.trim()).sort());
+  assert.equal(blocks.length, 3, 'one permissions block per job (test, assurelayer, report-runner-image-failure)');
+  assert.deepEqual(blocks[0], ['contents: read', 'id-token: write', 'packages: read'], 'test');
+  assert.deepEqual(blocks[1], ['contents: read', 'id-token: write', 'packages: read'], 'assurelayer');
+  assert.deepEqual(blocks[2], ['contents: read', 'id-token: write'], 'the failure reporter needs no packages');
+  assert.equal((WORKFLOW_CODE.match(/:\s*write\b/g) || []).length, 3, 'only id-token is write, once per job');
 });
 
 test('package installation: `npm ci` gets NODE_AUTH_TOKEN from the client package credential, else GITHUB_TOKEN (no personal token in the workflow)', () => {
@@ -313,7 +312,7 @@ test('OS package cache: keyed by runner image, used before the install, saved on
   assert.doesNotMatch(key.match(/run: .*/)[0], /inputs\./, 'no workflow input reaches the shell');
 
   const restore = stepBlock('Restore OS package cache');
-  assert.match(restore, /uses: actions\/cache\/restore@v4/);
+  assert.match(restore, /uses: actions\/cache\/restore@v5/);
   assert.match(restore, /if: \$\{\{ steps\.apt-key\.outputs\.key != '' \}\}/);
   assert.match(restore, /restore-keys: apt-debs-/);
 
@@ -332,7 +331,7 @@ test('OS package cache: keyed by runner image, used before the install, saved on
   assert.match(collect, /! -name 'google-chrome\*' ! -name 'microsoft-edge\*'/, 'branded browsers are always installed fresh, never from the cache');
   const save = stepBlock('Save OS package cache');
   assert.ok(save.includes(gate));
-  assert.match(save, /uses: actions\/cache\/save@v4/);
+  assert.match(save, /uses: actions\/cache\/save@v5/);
   assert.match(save, /key: \$\{\{ steps\.apt-key\.outputs\.key \}\}/);
   assert.match(stepBlock('Install selected browsers'), /id: install-browsers/);
 });

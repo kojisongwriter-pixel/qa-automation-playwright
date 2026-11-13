@@ -55,8 +55,13 @@ test('image definition: pinned base, verified Node.js, the project\'s Playwright
   assert.match(docker, /SHASUMS256\.txt[\s\S]*sha256sum -c -/, 'Node.js archive verified against the release checksums');
   const lock = JSON.parse(read('package-lock.json'));
   assert.match(docker, new RegExp(`ARG PLAYWRIGHT_VERSION=${lock.packages['node_modules/@playwright/test'].version.replace(/\./g, '\\.')}\\b`), 'same Playwright as package-lock.json');
-  assert.match(docker, /playwright@\$\{PLAYWRIGHT_VERSION\}" install --with-deps chrome msedge firefox webkit/, 'all four browsers with their OS packages');
+  assert.match(docker, /npm install -g "playwright@\$\{PLAYWRIGHT_VERSION\}"/, "the project's Playwright installer");
+  assert.match(docker, /playwright install-deps chrome msedge firefox webkit/, 'OS packages of all four browsers');
+  for (const part of ['chrome', 'msedge', 'firefox webkit']) assert.match(docker, new RegExp(`RUN playwright install ${part} &&`), `${part} in its own layer`);
+  assert.match(docker, /ARG NODE_VERSION=26\.13\.1/, 'the Node 26 security release');
+  assert.match(docker, /ARG NPM_VERSION=11\.21\.2[\s\S]*npm install -g "npm@\$\{NPM_VERSION\}"/, 'npm with the fixed undici / brace-expansion, same major');
   const copies = [...docker.matchAll(/^(COPY|ADD) (.+)$/gm)].map((m) => m[2]);
+  assert.ok(!/^RUN .*playwright install .*--force/m.test(docker));
   assert.deepEqual(copies, ['record-versions.js /usr/local/lib/assurelayer/record-versions.js'], 'nothing from the project is copied in');
   const instructions = docker.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
   assert.doesNotMatch(instructions, /TOKEN|SECRET|PASSWORD|_authToken/i, 'no credential in any instruction');
@@ -118,4 +123,50 @@ test('build workflow: daily + manual, validates the candidate (versions, four br
   assert.match(wf, /runner-image\/update-/, 'a digest change is proposed on its own branch for review');
   assert.match(wf, /packages: write/);
   assert.doesNotMatch(wf, /secrets\.(?!GITHUB_TOKEN|ASSURELAYER_PACKAGES_TOKEN)\w+/, 'no new secrets');
+});
+
+const { checkEvidence } = require('../../runner-image/evidence-check/verify-evidence');
+
+test('evidence check: screenshot, video and retry trace required for every browser', () => {
+  const ok = ['chrome', 'msedge', 'firefox', 'webkit'].flatMap((b) => [
+    `evidence-evidence-capture-expected-to-fail-${b}/test-failed-1.png`,
+    `evidence-evidence-capture-expected-to-fail-${b}/video.webm`,
+    `evidence-evidence-capture-expected-to-fail-${b}-retry1/trace.zip`,
+  ]);
+  assert.deepEqual(checkEvidence(ok).missing, []);
+  assert.deepEqual(checkEvidence(ok.filter((f) => !(f.includes('-webkit') && f.endsWith('.webm')))).missing, ['webkit: no video']);
+  assert.deepEqual(checkEvidence(ok.filter((f) => !f.includes('msedge-retry1'))).missing, ['msedge: no trace'], 'the trace comes from the retry');
+  const wf = read('.github/workflows/runner-image.yml');
+  assert.ok(wf.indexOf('name: Failure evidence check in the candidate image') < wf.indexOf('name: Publish'), 'checked before publishing');
+  assert.match(wf, /if \[ "\$code" -ne 1 \]; then echo "expected the evidence test to fail/, 'the deliberate failure must actually fail');
+  const cfg = read('runner-image/evidence-check/playwright.config.js');
+  assert.match(cfg, /screenshot: 'only-on-failure',\s*\n\s*video: 'retain-on-failure',\s*\n\s*trace: 'on-first-retry'/, "same evidence settings as the project's config");
+  assert.match(read('playwright.config.js'), /screenshot: 'only-on-failure',\s*\n\s*video: 'retain-on-failure',\s*\n\s*trace: 'on-first-retry'/);
+});
+
+test('runner-image job failure before it started is reported once, without tests; never after a started job or a cancellation', () => {
+  const j = job('report-runner-image-failure');
+  assert.match(j, /needs: assurelayer/);
+  assert.ok(j.includes("if: ${{ always() && needs.assurelayer.result == 'failure' && needs.assurelayer.outputs.started != 'true' && inputs.assurelayer_run_id != '' }}"));
+  assert.match(j, /run: node scripts\/assurelayer-callback\.js/);
+  assert.doesNotMatch(j, /playwright|npm ci|container:/, 'no test execution, no image');
+  const a = job('assurelayer');
+  assert.match(a, /outputs:\s*\n\s*started: \$\{\{ steps\.started\.outputs\.started \}\}/);
+  assert.ok(a.indexOf('- name: Execution started') < a.indexOf('- name: Checkout'), 'marked before anything else runs');
+});
+
+test('GitHub actions on their Node 24 majors (release notes reviewed); no Node 20 majors left', () => {
+  for (const f of ['.github/workflows/ci.yml', '.github/workflows/runner-image.yml']) {
+    const uses = [...read(f).matchAll(/uses: (actions\/[\w/-]+)@(v\d+)/g)].map((m) => `${m[1]}@${m[2]}`);
+    for (const u of uses) assert.match(u, /^actions\/(checkout@v5|setup-node@v5|cache@v5|cache\/(restore|save)@v5|upload-artifact@v6)$/, `${f}: ${u}`);
+  }
+});
+
+test('build workflow: retention is report-only; the proposal names the current and proposed digests', () => {
+  const wf = read('.github/workflows/runner-image.yml');
+  assert.match(wf, /name: Retention report/);
+  assert.doesNotMatch(wf, /packages\/container\/[\w-]+\/versions\/\d|delete-package-versions|--method DELETE|-X DELETE/, 'nothing is deleted');
+  assert.ok(wf.includes('echo "- current (approved): \\`${old}\\`"'), 'the current approved digest is named');
+  assert.ok(wf.includes('echo "- proposed: \\`${REF}\\`"'), 'the proposed digest is named');
+  assert.match(wf, /compressed transfer: /);
 });
