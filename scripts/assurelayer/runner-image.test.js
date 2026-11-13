@@ -112,6 +112,7 @@ test('build workflow: daily + manual, validates the candidate (versions, four br
   const wf = read('.github/workflows/runner-image.yml');
   assert.match(wf, /schedule:\s*\n\s*- cron: /);
   assert.match(wf, /workflow_dispatch:/);
+  assert.doesNotMatch(wf, /^\s+push:|pull_request:/m, 'only the daily schedule and a manual dispatch build images');
   const at = (s) => { const i = wf.indexOf(s); assert.ok(i >= 0, s); return i; };
   assert.ok(at('name: Build candidate image') < at('name: Four-browser smoke test in the candidate image'));
   assert.ok(at('name: Four-browser smoke test in the candidate image') < at('name: Publish'), 'nothing is published unless the candidate passed');

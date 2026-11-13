@@ -15,11 +15,6 @@ on:
   schedule:
     - cron: '23 3 * * *'
   workflow_dispatch:
-  # PROTOTYPE ONLY — remove before merging: GitHub dispatches only workflows that
-  # exist on the default branch, so the feature branch builds on its own pushes.
-  push:
-    branches: [perf/prebuilt-runner-image]
-    paths: [runner-image/**, .github/workflows/runner-image.yml]
 
 permissions: {}
 
