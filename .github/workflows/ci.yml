@@ -213,7 +213,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     container:
-      image: ghcr.io/kojisongwriter-pixel/assurelayer-runner@sha256:2d443b86021e6590178c2f5de99f135fd133b896f4497782114524a1c7f03fdc
+      image: ghcr.io/kojisongwriter-pixel/assurelayer-runner@sha256:415c2a11d0cd08b10bacd2a6991b2a69d62c3ebc30f0ebd8afbc7c2d716b4de0
       # Pull with this run's own GITHUB_TOKEN (packages: read below); no other credential.
       credentials:
         username: ${{ github.actor }}
@@ -225,7 +225,7 @@ jobs:
       contents: read
       packages: read
     env:
-      ASSURELAYER_RUNNER_IMAGE: ghcr.io/kojisongwriter-pixel/assurelayer-runner@sha256:2d443b86021e6590178c2f5de99f135fd133b896f4497782114524a1c7f03fdc
+      ASSURELAYER_RUNNER_IMAGE: ghcr.io/kojisongwriter-pixel/assurelayer-runner@sha256:415c2a11d0cd08b10bacd2a6991b2a69d62c3ebc30f0ebd8afbc7c2d716b4de0
     # 'true' once the container is running: from then on this job's own callback
     # step reports the outcome, so the reporter job below stays out.
     outputs:
