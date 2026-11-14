@@ -17,6 +17,10 @@
 # (plugins-bad 1.24.2) carries CVE-2025-3887 (HIGH) with the fix only in Ubuntu Pro
 # ESM; 26.04 ships GStreamer 1.28 and is not affected. Playwright 1.61 supports
 # 26.04 officially (ubuntu26.04-x64 builds and package list).
+# Playwright 1.65.1 (WebKit r2388): r2311 (1.61) has the WPE web-process exit crash of
+# WebKit bug 305909 (Mesa's atexit frees the EGL display while a WebKit thread still
+# uses it; heap corruption, SIGABRT, a multi-GB core on hosts that keep cores), fixed
+# in r2370; r2388 also has the follow-up exit-abort fix and libsoup 3.6.6.
 ARG BASE_IMAGE=ubuntu:26.04@sha256:065aa8626841f16057b78b027b464cd59c4fac36c204c72dcbf48d66f5fa8a96
 # hadolint ignore=DL3006
 FROM ${BASE_IMAGE}
@@ -34,7 +38,7 @@ ARG NODE_VERSION=26.13.1
 # glob 13.0.6 and minimatch 10.2.5 (MEDIUM DoS, CVE-2026-118773 / -118764, fixed only in
 # glob 14.0.2 / minimatch 11.0.1). npm's bundled dependencies are never patched by hand.
 ARG NPM_VERSION=11.21.2
-ARG PLAYWRIGHT_VERSION=1.61.0
+ARG PLAYWRIGHT_VERSION=1.65.1
 ARG BUILD_DATE=unknown
 ARG SOURCE_COMMIT=unknown
 

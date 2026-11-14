@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "client-qa",
   "version": "0.0.1",
   "description": "QA automation suite for [Client Name].",
@@ -9,7 +9,7 @@
     "report": "playwright show-report"
   },
   "devDependencies": {
-    "@playwright/test": "1.61.0",
-    "@kojisongwriter-pixel/qa-platform-core": "0.2.0"
+    "@kojisongwriter-pixel/qa-platform-core": "0.2.0",
+    "@playwright/test": "1.65.1"
   }
 }
