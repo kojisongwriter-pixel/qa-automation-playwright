@@ -66,7 +66,7 @@ function main(env = process.env) {
   const summary = { configured_image: env.ASSURELAYER_RUNNER_IMAGE || null, record, selected_browsers: result.browsers, problems: result.problems };
   console.log(`assurelayer runner image: ${summary.configured_image}`);
   if (record) {
-    console.log(`  built ${record.build_date} from ${record.source_commit} · ${record.os} · Node ${record.node} · Playwright ${record.playwright}`);
+    console.log(`  built ${record.build_date} from ${record.source_commit} · ${record.os}${record.base_image ? ` (${record.base_image})` : ''} · Node ${record.node} · npm ${record.npm || '?'} · Playwright ${record.playwright}`);
     console.log(`  Chrome ${record.chrome} · Edge ${record.msedge} · Firefox ${record.firefox && record.firefox.version} (r${record.firefox && record.firefox.playwright_revision}) · WebKit r${record.webkit && record.webkit.playwright_revision} · FFmpeg r${record.ffmpeg && record.ffmpeg.playwright_revision}`);
   }
   fs.mkdirSync(path.join(root, 'runner-image-record'), { recursive: true });

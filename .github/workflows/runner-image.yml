@@ -77,14 +77,29 @@ jobs:
         run: |
           docker run --rm --ipc=host             -v "$GITHUB_WORKSPACE:/work" -w /work -e CI=true -e EVIDENCE_OUT=/work/evidence-check-output             "$IMAGE:${{ steps.build.outputs.tag }}"             bash -c 'npx playwright test -c runner-image/evidence-check/playwright.config.js; code=$?; if [ "$code" -ne 1 ]; then echo "expected the evidence test to fail (exit 1), got $code"; exit 1; fi; node runner-image/evidence-check/verify-evidence.js'
 
-      # Report-only: HIGH/CRITICAL findings with an available fix are listed in the
-      # job summary for review; they do not block the daily build.
+      # Every severity, fixable AND unfixed, with a pinned scanner and a fresh
+      # database. Findings are report-only (job summary, the proposal and the
+      # complete JSON report as an artifact) and do not block the daily build; a
+      # scanner failure does, so nothing is published without a complete scan.
       - name: Vulnerability scan
+        env:
+          TRIVY: aquasec/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c # 0.76.1
         run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.58.1 \
-            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --no-progress --exit-code 0 \
-            "$IMAGE:${{ steps.build.outputs.tag }}" | tee trivy.txt
-          { echo '### Vulnerability scan (HIGH/CRITICAL, fixable)'; echo '```'; grep -E '^Total:|^[a-z0-9.-]+ \(' trivy.txt || echo 'no findings'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache -v "$PWD:/out" "$TRIVY" \
+            image --image-src docker --scanners vuln --timeout 30m --no-progress --exit-code 0 \
+            --format json --output /out/trivy.json "$IMAGE:${{ steps.build.outputs.tag }}"
+          docker run --rm -v trivy-cache:/root/.cache "$TRIVY" version --format json > trivy-version.json
+          node runner-image/summarize-scan.js trivy.json trivy-version.json | tee trivy.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the complete scan report
+        uses: actions/upload-artifact@v6
+        with:
+          name: trivy-report-${{ steps.build.outputs.tag }}
+          path: |
+            trivy.json
+            trivy-version.json
+            runner-image.json
+          retention-days: 90
 
       - name: Publish
         id: publish
@@ -128,7 +143,7 @@ jobs:
           git switch -c "$branch"
           git commit -q -am "ci: runner image ${{ steps.build.outputs.tag }}"
           git push origin "$branch"
-          { echo "Runner image \`${{ steps.build.outputs.tag }}\` passed the four-browser smoke test, the failure-evidence check and the vulnerability scan (below)."; echo; echo "- current (approved): \`${old}\`"; echo "- proposed: \`${REF}\`"; echo "- compressed transfer: ${COMPRESSED}"; echo; echo '```json'; cat runner-image.json; echo '```'; echo; echo '```'; grep -E '^Total:|^[a-z0-9.-]+ \(' trivy.txt || echo 'no HIGH/CRITICAL fixable findings'; echo '```'; echo; echo "Merging this changes the image dispatched AssureLayer runs use. The current digest stays published for rollback."; } > pr-body.md
+          { echo "Runner image \`${{ steps.build.outputs.tag }}\` passed the four-browser smoke test, the failure-evidence check and the vulnerability scan (below)."; echo; echo "- current (approved): \`${old}\`"; echo "- proposed: \`${REF}\`"; echo "- compressed transfer: ${COMPRESSED}"; echo; echo '```json'; cat runner-image.json; echo '```'; echo; cat trivy.md; echo; echo "Merging this changes the image dispatched AssureLayer runs use. The current digest stays published for rollback."; } > pr-body.md
           gh pr create --base main --head "$branch" --title "ci: runner image ${{ steps.build.outputs.tag }}" --body-file pr-body.md \
             || echo "::warning::Could not open the pull request automatically (the repository does not allow GitHub Actions to create pull requests). Open one from branch $branch."
         env:

@@ -50,7 +50,10 @@ test('image check: only the SELECTED browsers must be present; a missing selecte
 
 test('image definition: pinned base, verified Node.js, the project\'s Playwright installer, no project source or secrets', () => {
   const docker = read('runner-image/Dockerfile');
-  assert.match(docker, /^FROM ubuntu:24\.04@sha256:[0-9a-f]{64}$/m, 'base image pinned by digest');
+  assert.match(docker, /^ARG BASE_IMAGE=ubuntu:26\.04@sha256:[0-9a-f]{64}$/m, 'Ubuntu 26.04 base pinned by digest');
+  assert.match(docker, /^FROM \$\{BASE_IMAGE\}\nARG BASE_IMAGE$/m, 'built FROM exactly that, and the digest reaches the build record');
+  assert.match(docker, /BASE_IMAGE="\$\{BASE_IMAGE\}"[^\n]*\\\n\s*node \/usr\/local\/lib\/assurelayer\/record-versions\.js/);
+  assert.match(docker, /apt-get update \\\n\s*&& apt-get upgrade -y/, "the base image's own packages get the current security updates");
   assert.match(docker, /ARG NODE_VERSION=26\.\d+\.\d+/);
   assert.match(docker, /SHASUMS256\.txt[\s\S]*sha256sum -c -/, 'Node.js archive verified against the release checksums');
   const lock = JSON.parse(read('package-lock.json'));
@@ -65,6 +68,42 @@ test('image definition: pinned base, verified Node.js, the project\'s Playwright
   assert.deepEqual(copies, ['record-versions.js /usr/local/lib/assurelayer/record-versions.js'], 'nothing from the project is copied in');
   const instructions = docker.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
   assert.doesNotMatch(instructions, /TOKEN|SECRET|PASSWORD|_authToken/i, 'no credential in any instruction');
+});
+
+test('build record: names the base image and the exact security-relevant OS packages', () => {
+  const rec = read('runner-image/record-versions.js');
+  assert.match(rec, /base_image: process\.env\.BASE_IMAGE/);
+  for (const p of ['libc6', 'libc-bin', 'gstreamer1.0-plugins-bad', 'libgstreamer-plugins-bad1.0-0']) assert.ok(rec.includes(`'${p}'`), p);
+  assert.match(rec, /spawnSync\('dpkg-query'/, 'a package missing from the list cannot fail the build');
+});
+
+test('vulnerability scan: pinned Trivy, every severity, unfixed included, complete report kept', () => {
+  const wf = read('.github/workflows/runner-image.yml');
+  const step = wf.slice(wf.indexOf('- name: Vulnerability scan'), wf.indexOf('- name: Publish'));
+  assert.match(step, /TRIVY: aquasec\/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c/, 'scanner pinned by digest');
+  assert.doesNotMatch(step, /--ignore-unfixed|--severity|--skip-|\.trivyignore|--ignorefile/, 'nothing filtered or suppressed');
+  assert.match(step, /--format json --output \/out\/trivy\.json/);
+  assert.match(step, /name: trivy-report-\$\{\{ steps\.build\.outputs\.tag \}\}[\s\S]*trivy\.json/, 'the complete JSON report is uploaded');
+  assert.ok(wf.indexOf('- name: Vulnerability scan') < wf.indexOf('- name: Publish'), 'scanned before publishing');
+  const { summarize } = require('../../runner-image/summarize-scan');
+  const report = {
+    ArtifactName: 'img',
+    Results: [
+      { Target: 'os', Type: 'ubuntu', Packages: [{}, {}], Vulnerabilities: [
+        { VulnerabilityID: 'CVE-1', Severity: 'HIGH', PkgName: 'a', InstalledVersion: '1', Status: 'affected' },
+        { VulnerabilityID: 'CVE-2', Severity: 'MEDIUM', PkgName: 'b', InstalledVersion: '1', FixedVersion: '2', Status: 'fixed' },
+        { VulnerabilityID: 'CVE-3', Severity: 'LOW', PkgName: 'c', InstalledVersion: '1' },
+      ] },
+      { Target: 'Node.js', Type: 'node-pkg', Vulnerabilities: [{ VulnerabilityID: 'CVE-4', Severity: 'CRITICAL', PkgName: 'd', InstalledVersion: '1', FixedVersion: '3' }] },
+    ],
+  };
+  const s = summarize(report, { Version: '0.76.1', VulnerabilityDB: { Version: 2, UpdatedAt: '2026-11-14T01:05:40Z' } });
+  assert.deepEqual(s.counts.HIGH, { total: 1, fixable: 0, unfixed: 1 }, 'unfixed findings are counted, not dropped');
+  assert.deepEqual(s.counts.MEDIUM, { total: 1, fixable: 1, unfixed: 0 });
+  assert.equal(s.counts.LOW.total, 1);
+  assert.deepEqual(s.serious.map((f) => f.VulnerabilityID), ['CVE-1', 'CVE-4']);
+  assert.match(s.markdown, /Trivy 0\.76\.1 · database v2 updated 2026-11-14T01:05:40Z/);
+  assert.match(s.markdown, /- HIGH CVE-1 `a` 1 → fixed: none \(affected, ubuntu\)/);
 });
 
 const DISPATCHED = "github.event_name == 'workflow_dispatch' && (inputs.assurelayer_run_id != '' || inputs.browsers != '')";

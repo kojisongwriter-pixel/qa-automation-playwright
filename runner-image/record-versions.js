@@ -4,7 +4,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 
 const version = (cmd, args) => execFileSync(cmd, args, { encoding: 'utf8' }).trim();
 const browsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH || '/ms-playwright';
@@ -16,11 +16,25 @@ const revision = (name) => {
 };
 const firefoxIni = fs.readFileSync(path.join(browsersPath, `firefox-${revision('firefox')}`, 'firefox', 'application.ini'), 'utf8');
 
+// Security-relevant OS packages, by exact Debian version (missing ones are omitted).
+const PACKAGES = ['libc6', 'libc-bin', 'libgstreamer1.0-0', 'gstreamer1.0-plugins-bad', 'libgstreamer-plugins-bad1.0-0', 'openssl', 'libssl3t64'];
+// dpkg-query exits non-zero when any listed package is absent; its output still lists the present ones.
+const packages = Object.fromEntries(
+  spawnSync('dpkg-query', ['-W', '-f', '${Package} ${Version}\\n', ...PACKAGES], { encoding: 'utf8' })
+    .stdout.split('\n')
+    .map((l) => l.trim().split(' '))
+    .filter(([name, ver]) => name && ver)
+);
+
 const record = {
   image: 'assurelayer-runner',
   build_date: process.env.BUILD_DATE || 'unknown',
   source_commit: process.env.SOURCE_COMMIT || 'unknown',
+  // The exact base image (tag@digest) it was built FROM. The image's own digest is
+  // known only after the push; the in-job check records it with the run.
+  base_image: process.env.BASE_IMAGE || 'unknown',
   os: version('bash', ['-c', '. /etc/os-release && echo "$PRETTY_NAME"']),
+  packages,
   node: process.version.replace(/^v/, ''),
   npm: version('npm', ['--version']),
   playwright: process.env.PLAYWRIGHT_VERSION,
