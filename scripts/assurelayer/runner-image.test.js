@@ -210,14 +210,20 @@ test('reporter: skipped when the image job callback was accepted — whatever th
 });
 
 test('reporter: runs when the container never started, reporting an execution error with no results', () => {
-  const d = reporterDecision({ steps: {}, jobResult: 'failure' });
-  assert.equal(d.outputs.callback_succeeded, 'false');
-  assert.equal(d.runs, true);
-  assert.equal(d.outcome, 'runner_image_unavailable');
+  // Observed on GitHub (run 43550575660, unpullable digest): "Initialize containers"
+  // failed, tests were 'skipped', the always() callback step 'failure', nothing uploaded.
+  const observed = reporterDecision({ steps: { tests: 'skipped', callback: 'failure' }, jobResult: 'failure' });
+  // And if GitHub ever reports no step outcomes at all:
+  const empty = reporterDecision({ steps: {}, jobResult: 'failure' });
   const { buildPayload } = require('./buildPayload');
-  const { payload } = buildPayload({ resultsFile: path.join(ROOT, 'no-such', 'results.json'), failuresDir: path.join(ROOT, 'no-such'), playwrightOutcome: d.outcome });
-  assert.equal(payload.execution_status, 'error');
-  assert.deepEqual(payload.results, []);
+  for (const [d, expected] of [[observed, 'skipped'], [empty, 'runner_image_unavailable']]) {
+    assert.equal(d.outputs.callback_succeeded, 'false');
+    assert.equal(d.runs, true);
+    assert.equal(d.outcome, expected);
+    const { payload } = buildPayload({ resultsFile: path.join(ROOT, 'no-such', 'results.json'), failuresDir: path.join(ROOT, 'no-such'), playwrightOutcome: d.outcome });
+    assert.equal(payload.execution_status, 'error');
+    assert.deepEqual(payload.results, []);
+  }
 });
 
 test('reporter: runs when checkout or setup failed before the callback could be accepted', () => {

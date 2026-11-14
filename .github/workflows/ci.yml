@@ -232,7 +232,8 @@ jobs:
     #     else (container never started, checkout/setup failed before the callback,
     #     callback not accepted) leaves it 'false'.
     #   tests_outcome — the Playwright step's outcome, so a retry reports the same
-    #     execution status; empty when the container never started.
+    #     execution status ('skipped' when the container never started, which
+    #     like any outcome other than success/failure is reported as an error).
     #   results_artifact — the uploaded test-results artifact's id; empty when
     #     nothing was uploaded (the container never started, or no files).
     outputs:
