@@ -226,16 +226,21 @@ jobs:
       packages: read
     env:
       ASSURELAYER_RUNNER_IMAGE: ghcr.io/kojisongwriter-pixel/assurelayer-runner@sha256:415c2a11d0cd08b10bacd2a6991b2a69d62c3ebc30f0ebd8afbc7c2d716b4de0
-    # 'true' once the container is running: from then on this job's own callback
-    # step reports the outcome, so the reporter job below stays out.
+    # What the reporter job below needs to decide and to retry:
+    #   callback_succeeded — 'true' only when this job's own callback step ran AND
+    #     AssureLayer accepted it (the step exits 0 only on acceptance). Anything
+    #     else (container never started, checkout/setup failed before the callback,
+    #     callback not accepted) leaves it 'false'.
+    #   tests_outcome — the Playwright step's outcome, so a retry reports the same
+    #     execution status; empty when the container never started.
+    #   results_artifact — the uploaded test-results artifact's id; empty when
+    #     nothing was uploaded (the container never started, or no files).
     outputs:
-      started: ${{ steps.started.outputs.started }}
+      callback_succeeded: ${{ steps.callback.outcome == 'success' }}
+      tests_outcome: ${{ steps.tests.outcome }}
+      results_artifact: ${{ steps.upload-results.outputs.artifact-id }}
 
     steps:
-      - name: Execution started
-        id: started
-        run: echo "started=true" >> "$GITHUB_OUTPUT"
-
       - name: Checkout
         uses: actions/checkout@v5
 
@@ -276,6 +281,7 @@ jobs:
           HOME: /root
 
       - name: Report results to AssureLayer
+        id: callback
         if: ${{ always() && inputs.assurelayer_run_id != '' }}
         run: node scripts/assurelayer-callback.js
         env:
@@ -292,7 +298,10 @@ jobs:
           path: playwright-report/
           retention-days: 30
 
+      # Also the reporter job's input when this job's callback was not accepted:
+      # test-results/assurelayer/results.json and test-results/failures/.
       - name: Upload test results
+        id: upload-results
         uses: actions/upload-artifact@v6
         if: always()
         with:
@@ -302,17 +311,25 @@ jobs:
             runner-image-record/
           retention-days: 30
 
-  # The image job could not start at all (e.g. the image could not be pulled or the
-  # container did not start), so it never reached its own callback step. Report
-  # that execution failure to AssureLayer at once — with no results — instead of
-  # leaving the run 'running' until the stale-run policy closes it. It never runs
-  # tests (no duplicate execution or results); a cancelled run is not reported.
+  # Guarantees that a failed image-path execution is reported to AssureLayer even
+  # when the image job's own callback did not get through — instead of leaving the
+  # run 'running' until the stale-run policy closes it. It runs ONLY when:
+  #   * the workflow was not cancelled (a cancellation is never reported as an
+  #     execution failure; the dashboard's cancel flow owns that outcome), and
+  #   * the image job failed, and
+  #   * that job's callback was not accepted: the container never started, checkout
+  #     or setup failed before the callback, or the callback itself failed.
+  # It never runs Playwright. It resends the SAME batch the image job would have
+  # sent — the results that job uploaded, with its Playwright outcome — so a retry
+  # after a lost acceptance or a partial (resumable) batch is idempotent server-side
+  # and cannot duplicate results. With no uploaded results (the container never
+  # started) the batch is an execution error with no results.
   # Rollback to the per-run installation stays an explicit choice
   # (ASSURELAYER_RUNNER_IMAGE_DISABLED), never automatic.
   report-runner-image-failure:
     name: Report runner-image failure to AssureLayer
     needs: assurelayer
-    if: ${{ always() && needs.assurelayer.result == 'failure' && needs.assurelayer.outputs.started != 'true' && inputs.assurelayer_run_id != '' }}
+    if: ${{ !cancelled() && needs.assurelayer.result == 'failure' && needs.assurelayer.outputs.callback_succeeded != 'true' && inputs.assurelayer_run_id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -322,10 +339,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # The image job's results, only when it uploaded some (none when the
+      # container never started).
+      - name: Download the image job's results
+        id: results
+        if: ${{ needs.assurelayer.outputs.results_artifact != '' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: test-results-${{ github.run_id }}
+          path: .assurelayer-retry
+
+      - name: Restore the results for the callback
+        if: ${{ steps.results.outcome == 'success' }}
+        run: |
+          if [ -d .assurelayer-retry/test-results ]; then mv .assurelayer-retry/test-results test-results
+          elif [ -d .assurelayer-retry/assurelayer ] || [ -d .assurelayer-retry/failures ]; then mv .assurelayer-retry test-results
+          fi
+          find test-results -maxdepth 2 2>/dev/null | head -20 || echo "no results were uploaded"
+
+      # Runs even if the download failed: a batch without results is still an
+      # execution error AssureLayer must receive (this job then fails visibly).
       - name: Report results to AssureLayer
+        if: ${{ !cancelled() }}
         run: node scripts/assurelayer-callback.js
         env:
           ASSURELAYER_RUN_ID: ${{ inputs.assurelayer_run_id }}
           ASSURELAYER_API_URL: ${{ vars.ASSURELAYER_API_URL }}
           ASSURELAYER_OIDC_AUDIENCE: ${{ vars.ASSURELAYER_OIDC_AUDIENCE }}
-          PLAYWRIGHT_OUTCOME: runner_image_unavailable
+          PLAYWRIGHT_OUTCOME: ${{ needs.assurelayer.outputs.tests_outcome || 'runner_image_unavailable' }}

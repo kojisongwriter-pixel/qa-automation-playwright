@@ -145,21 +145,132 @@ test('evidence check: screenshot, video and retry trace required for every brows
   assert.match(read('playwright.config.js'), /screenshot: 'only-on-failure',\s*\n\s*video: 'retain-on-failure',\s*\n\s*trace: 'on-first-retry'/);
 });
 
-test('runner-image job failure before it started is reported once, without tests; never after a started job or a cancellation', () => {
-  const j = job('report-runner-image-failure');
-  assert.match(j, /needs: assurelayer/);
-  assert.ok(j.includes("if: ${{ always() && needs.assurelayer.result == 'failure' && needs.assurelayer.outputs.started != 'true' && inputs.assurelayer_run_id != '' }}"));
-  assert.match(j, /run: node scripts\/assurelayer-callback\.js/);
-  assert.doesNotMatch(j, /playwright|npm ci|container:/, 'no test execution, no image');
+// A minimal evaluator for the GitHub Actions expressions used by the reporter
+// decision: literals, property access, !, ==, !=, &&, || (value-returning),
+// parentheses and status functions. Comparison follows GitHub: strings compare
+// case-insensitively, null equals only null.
+function evaluate(expr, ctx) {
+  const tokens = expr.match(/'(?:[^']|'')*'|&&|\|\||==|!=|[!()]|[A-Za-z_][\w.-]*(?:\(\))?/g);
+  let i = 0;
+  const peek = () => tokens[i];
+  const truthy = (v) => !(v === null || v === undefined || v === false || v === '' || v === 0);
+  const eq = (a, b) => (typeof a === 'string' && typeof b === 'string' ? a.toLowerCase() === b.toLowerCase() : (a ?? null) === (b ?? null));
+  function primary() {
+    const t = tokens[i++];
+    if (t === '(') { const v = or(); assert.equal(tokens[i++], ')'); return v; }
+    if (t === '!') return !truthy(primary());
+    if (t.startsWith("'")) return t.slice(1, -1).replace(/''/g, "'");
+    if (t.endsWith('()')) return ctx.functions[t.slice(0, -2)]();
+    return t.split('.').reduce((o, k) => (o == null ? null : o[k] ?? null), ctx);
+  }
+  function cmp() {
+    let v = primary();
+    while (peek() === '==' || peek() === '!=') { const op = tokens[i++]; const r = primary(); v = op === '==' ? eq(v, r) : !eq(v, r); }
+    return v;
+  }
+  function and() { let v = cmp(); while (peek() === '&&') { i++; const r = cmp(); v = truthy(v) ? r : v; } return v; }
+  function or() { let v = and(); while (peek() === '||') { i++; const r = and(); v = truthy(v) ? v : r; } return v; }
+  const v = or();
+  assert.equal(i, tokens.length, `parsed all of: ${expr}`);
+  return v;
+}
+// Job outputs and env values are strings: true -> 'true', null -> ''.
+const asString = (v) => (v === null || v === undefined ? '' : String(v));
+const exprOf = (text, key) => {
+  const m = text.match(new RegExp(`\\n\\s*${key}: \\$\\{\\{ (.+?) \\}\\}`));
+  assert.ok(m, `${key} is an expression`);
+  return m[1];
+};
+
+// What GitHub would decide for the reporter job, from the image job's step outcomes.
+function reporterDecision({ steps, jobResult, workflowCancelled = false, runId = 'RUN-1' }) {
   const a = job('assurelayer');
-  assert.match(a, /outputs:\s*\n\s*started: \$\{\{ steps\.started\.outputs\.started \}\}/);
-  assert.ok(a.indexOf('- name: Execution started') < a.indexOf('- name: Checkout'), 'marked before anything else runs');
+  const r = job('report-runner-image-failure');
+  const stepsCtx = Object.fromEntries(Object.entries(steps).map(([id, outcome]) => [id, { outcome }]));
+  const fns = { functions: { cancelled: () => workflowCancelled, always: () => true } };
+  const outputs = {
+    callback_succeeded: asString(evaluate(exprOf(a, 'callback_succeeded'), { steps: stepsCtx, ...fns })),
+    tests_outcome: asString(evaluate(exprOf(a, 'tests_outcome'), { steps: stepsCtx, ...fns })),
+  };
+  const ctx = { needs: { assurelayer: { result: jobResult, outputs } }, inputs: { assurelayer_run_id: runId }, ...fns };
+  const runs = Boolean(evaluate(exprOf(r, 'if'), ctx));
+  const outcome = asString(evaluate(exprOf(r, 'PLAYWRIGHT_OUTCOME'), ctx));
+  return { runs, outcome, outputs };
+}
+
+test('reporter: skipped when the image job callback was accepted — whatever the tests did', () => {
+  for (const tests of ['success', 'failure']) {
+    // Tests failed + callback accepted: the job still fails (Playwright's step), and the reporter must stay out.
+    const d = reporterDecision({ steps: { tests, callback: 'success' }, jobResult: tests === 'success' ? 'success' : 'failure' });
+    assert.equal(d.outputs.callback_succeeded, 'true');
+    assert.equal(d.runs, false, `tests ${tests}`);
+  }
+  // Callback accepted but an artifact upload failed afterwards: still no second report.
+  assert.equal(reporterDecision({ steps: { tests: 'success', callback: 'success' }, jobResult: 'failure' }).runs, false);
+});
+
+test('reporter: runs when the container never started, reporting an execution error with no results', () => {
+  const d = reporterDecision({ steps: {}, jobResult: 'failure' });
+  assert.equal(d.outputs.callback_succeeded, 'false');
+  assert.equal(d.runs, true);
+  assert.equal(d.outcome, 'runner_image_unavailable');
+  const { buildPayload } = require('./buildPayload');
+  const { payload } = buildPayload({ resultsFile: path.join(ROOT, 'no-such', 'results.json'), failuresDir: path.join(ROOT, 'no-such'), playwrightOutcome: d.outcome });
+  assert.equal(payload.execution_status, 'error');
+  assert.deepEqual(payload.results, []);
+});
+
+test('reporter: runs when checkout or setup failed before the callback could be accepted', () => {
+  // Checkout failed: the always() callback step runs but cannot succeed (no script).
+  const d = reporterDecision({ steps: { tests: 'skipped', callback: 'failure' }, jobResult: 'failure' });
+  assert.equal(d.runs, true);
+  assert.equal(d.outcome, 'skipped', 'mapped to execution_status error');
+  // The callback step never ran at all (e.g. the job failed in a step before it with no always()).
+  assert.equal(reporterDecision({ steps: { tests: 'skipped' }, jobResult: 'failure' }).runs, true);
+});
+
+test('reporter: retries a failed callback with the SAME Playwright outcome (idempotent resend, no new results)', () => {
+  for (const tests of ['success', 'failure']) {
+    const d = reporterDecision({ steps: { tests, callback: 'failure' }, jobResult: 'failure' });
+    assert.equal(d.runs, true);
+    assert.equal(d.outcome, tests, 'resends what the image job would have sent');
+  }
+  const r = job('report-runner-image-failure');
+  assert.match(r, /uses: actions\/download-artifact@v8\n\s*with:\n\s*name: test-results-\$\{\{ github\.run_id \}\}/, "resends the image job's own uploaded results");
+  assert.match(r, /if: \$\{\{ needs\.assurelayer\.outputs\.results_artifact != '' \}\}\n\s*uses: actions\/download-artifact@v8/, 'downloads only what the image job actually uploaded');
+  assert.match(r, /- name: Report results to AssureLayer\n\s*if: \$\{\{ !cancelled\(\) \}\}/, 'reports even if the download failed');
+  const a = job('assurelayer');
+  assert.match(a, /results_artifact: \$\{\{ steps\.upload-results\.outputs\.artifact-id \}\}/);
+  assert.ok(a.indexOf('id: callback') < a.indexOf('name: test-results-${{ github.run_id }}'), 'results are uploaded after the callback attempt');
+  assert.match(a, /- name: Upload test results\n\s*id: upload-results\n\s*uses: actions\/upload-artifact@v6\n\s*if: always\(\)/);
+});
+
+test('reporter: never reports a cancelled run as an execution failure', () => {
+  assert.equal(reporterDecision({ steps: { tests: 'cancelled', callback: 'success' }, jobResult: 'cancelled', workflowCancelled: true }).runs, false);
+  assert.equal(reporterDecision({ steps: { tests: 'cancelled', callback: 'failure' }, jobResult: 'cancelled', workflowCancelled: true }).runs, false);
+  assert.equal(reporterDecision({ steps: {}, jobResult: 'cancelled', workflowCancelled: true }).runs, false, 'cancelled while the container was starting');
+  // Even if the image job had already failed, a workflow cancellation keeps the reporter out.
+  assert.equal(reporterDecision({ steps: { tests: 'failure', callback: 'failure' }, jobResult: 'failure', workflowCancelled: true }).runs, false);
+});
+
+test('reporter: out of non-AssureLayer runs and of the rollback path', () => {
+  assert.equal(reporterDecision({ steps: {}, jobResult: 'failure', runId: '' }).runs, false, 'browsers-only dispatch: no AssureLayer run to report to');
+  assert.equal(reporterDecision({ steps: {}, jobResult: 'skipped' }).runs, false, 'ASSURELAYER_RUNNER_IMAGE_DISABLED: the image job is skipped');
+  assert.equal(reporterDecision({ steps: { tests: 'success', callback: 'success' }, jobResult: 'success' }).runs, false);
+});
+
+test('reporter: never executes tests, never uses the image, never runs Playwright', () => {
+  const r = job('report-runner-image-failure');
+  assert.match(r, /needs: assurelayer/);
+  assert.doesNotMatch(r, /playwright test|npx playwright|npm ci|container:/);
+  assert.equal((r.match(/run: node scripts\/assurelayer-callback\.js/g) || []).length, 1, 'exactly one callback');
+  assert.doesNotMatch(job('assurelayer'), /Execution started|steps\.started/, 'container start alone no longer counts as reported');
 });
 
 test('GitHub actions on their Node 24 majors (release notes reviewed); no Node 20 majors left', () => {
   for (const f of ['.github/workflows/ci.yml', '.github/workflows/runner-image.yml']) {
     const uses = [...read(f).matchAll(/uses: (actions\/[\w/-]+)@(v\d+)/g)].map((m) => `${m[1]}@${m[2]}`);
-    for (const u of uses) assert.match(u, /^actions\/(checkout@v5|setup-node@v5|cache@v5|cache\/(restore|save)@v5|upload-artifact@v6)$/, `${f}: ${u}`);
+    for (const u of uses) assert.match(u, /^actions\/(checkout@v5|setup-node@v5|cache@v5|cache\/(restore|save)@v5|upload-artifact@v6|download-artifact@v8)$/, `${f}: ${u}`);
   }
 });
 
