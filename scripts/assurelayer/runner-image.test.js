@@ -106,6 +106,35 @@ test('vulnerability scan: pinned Trivy, every severity, unfixed included, comple
   assert.match(s.markdown, /- HIGH CVE-1 `a` 1 → fixed: none \(affected, ubuntu\)/);
 });
 
+// Structural guard (no YAML dependency): a workflow file with a duplicated or
+// stray top-level key cannot be parsed by GitHub, which then records a failed run
+// with "No jobs were run" on every push (observed: run 43550531838, a garbled
+// temporary-branch commit 4dbfbb7 with a second `jobs:` and a stray `equest:`).
+function workflowShape(text) {
+  const lines = text.split('\n');
+  const top = lines.filter((l) => /^[^\s#][^:]*:/.test(l)).map((l) => l.split(':')[0]);
+  const start = lines.indexOf('jobs:');
+  const jobs = start < 0 ? [] : lines.slice(start + 1).filter((l) => /^ {2}[a-z][\w-]*:\s*$/.test(l)).map((l) => l.trim().slice(0, -1));
+  return { top, jobs, hasCR: text.includes('\r') };
+}
+
+test('workflow files are structurally valid: each top-level key once, the expected jobs, LF only', () => {
+  const expect = {
+    '.github/workflows/ci.yml': { top: ['name', 'on', 'jobs'], jobs: ['test', 'assurelayer', 'report-runner-image-failure'] },
+    '.github/workflows/runner-image.yml': { top: ['name', 'on', 'permissions', 'concurrency', 'jobs'], jobs: ['build'] },
+  };
+  for (const [f, want] of Object.entries(expect)) {
+    const raw = fs.readFileSync(path.join(ROOT, f), 'utf8');
+    const s = workflowShape(raw.replace(/\r\n/g, '\n'));
+    assert.deepEqual(s.top, want.top, `${f}: top-level keys`);
+    assert.deepEqual(s.jobs, want.jobs, `${f}: jobs`);
+    assert.ok(!raw.replace(/\r\n/g, '\n').includes('\r'), `${f}: no stray carriage returns`);
+  }
+  // The guard catches the broken shape that produced "No jobs were run".
+  const broken = workflowShape('name: CI\n\non:\n  push:\njobs:\n  test:\n    runs-on: x\nequest:\njobs:\n  test:\n');
+  assert.notDeepEqual(broken.top, ['name', 'on', 'jobs']);
+});
+
 const DISPATCHED = "github.event_name == 'workflow_dispatch' && (inputs.assurelayer_run_id != '' || inputs.browsers != '')";
 function job(name) {
   const wf = read('.github/workflows/ci.yml');
