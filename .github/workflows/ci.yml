@@ -213,7 +213,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     container:
-      image: ghcr.io/kojisongwriter-pixel/assurelayer-runner@sha256:415c2a11d0cd08b10bacd2a6991b2a69d62c3ebc30f0ebd8afbc7c2d716b4de0
+      image: ghcr.io/kojisongwriter-pixel/assurelayer-runner@sha256:6994e493b88c0f361af6d307c5f3ba21f7052dece5d0d9495bc75bf9f012b7c5
       # Pull with this run's own GITHUB_TOKEN (packages: read below); no other credential.
       credentials:
         username: ${{ github.actor }}
@@ -225,7 +225,7 @@ jobs:
       contents: read
       packages: read
     env:
-      ASSURELAYER_RUNNER_IMAGE: ghcr.io/kojisongwriter-pixel/assurelayer-runner@sha256:415c2a11d0cd08b10bacd2a6991b2a69d62c3ebc30f0ebd8afbc7c2d716b4de0
+      ASSURELAYER_RUNNER_IMAGE: ghcr.io/kojisongwriter-pixel/assurelayer-runner@sha256:6994e493b88c0f361af6d307c5f3ba21f7052dece5d0d9495bc75bf9f012b7c5
     # What the reporter job below needs to decide and to retry:
     #   callback_succeeded — 'true' only when this job's own callback step ran AND
     #     AssureLayer accepted it (the step exits 0 only on acceptance). Anything
