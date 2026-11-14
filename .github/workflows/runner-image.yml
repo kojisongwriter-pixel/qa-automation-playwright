@@ -12,6 +12,8 @@ name: Runner image
 # allows GitHub Actions to; it never pushes to main.
 
 on:
+  push:
+    branches: [validate/image-pw165]
   schedule:
     - cron: '23 3 * * *'
   workflow_dispatch:
