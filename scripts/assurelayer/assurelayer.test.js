@@ -298,7 +298,8 @@ test('only dispatched runs reach scope resolution, selected-browser install and 
   assert.ok(stepBlock('Install selected browsers').includes(`if: \${{ ${DISPATCHED} }}`));
   assert.ok(stepBlock('Install Playwright browsers').includes(`if: \${{ !(${DISPATCHED}) }}`), 'push/PR keep the chromium install');
   assert.match(stepBlock('Report results to AssureLayer'), /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' && inputs\.assurelayer_run_id != '' \}\}/);
-  assert.equal((WORKFLOW_CODE.match(/github\.event_name == 'workflow_dispatch'/g) || []).length, 4, 'no other step is gated on dispatch');
+  assert.match(stepBlock('Package client-safe evidence'), /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' && inputs\.assurelayer_run_id != '' \}\}/);
+  assert.equal((WORKFLOW_CODE.match(/github\.event_name == 'workflow_dispatch'/g) || []).length, 5, 'no other step is gated on dispatch');
   assert.ok(!/github\.event_name == 'push'/.test(WORKFLOW));
 });
 

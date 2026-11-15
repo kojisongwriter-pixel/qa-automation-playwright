@@ -149,3 +149,28 @@ jobs:
           name: test-results-${{ github.run_id }}
           path: test-results/
           retention-days: 30
+
+      # Client-safe evidence package (AssureLayer runs only): an explicit
+      # allow-list of failure screenshots / videos plus sanitized results and a
+      # manifest (scripts/assurelayer/package-client-evidence.js) — the ONLY
+      # archive the AssureLayer portal delivers to client organization members.
+      # The raw test-results / playwright-report artifacts above are unchanged
+      # (internal diagnostics; never linked by the portal). The packager never
+      # fails the job: on an error it uploads nothing (if-no-files-found:
+      # ignore) and the portal offers no evidence archive at all — fail closed,
+      # never the raw one. Test results and the callback are unaffected.
+      - name: Package client-safe evidence
+        id: client_evidence
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.assurelayer_run_id != '' }}
+        run: node scripts/assurelayer/package-client-evidence.js
+        env:
+          ASSURELAYER_RUN_ID: ${{ inputs.assurelayer_run_id }}
+
+      - name: Upload client-safe evidence
+        uses: actions/upload-artifact@v4
+        if: ${{ always() && steps.client_evidence.outcome == 'success' }}
+        with:
+          name: client-evidence-${{ github.run_id }}
+          path: client-evidence/
+          retention-days: 30
+          if-no-files-found: ignore
